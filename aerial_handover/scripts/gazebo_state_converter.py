@@ -4,8 +4,9 @@
 import rospy
 import numpy as np
 import tf.transformations as tft
+import tf2_ros
 
-from geometry_msgs.msg import PoseStamped, Twist
+from geometry_msgs.msg import PoseStamped, Twist, TransformStamped
 from gazebo_msgs.msg import LinkState, LinkStates
 
 
@@ -19,6 +20,7 @@ class PoseToGazeboPublisher:
             LinkState,
             queue_size=10
         )
+        self.tf_broadcaster = tf2_ros.TransformBroadcaster()
 
         # ===== Subscribers =====
         rospy.Subscriber('hand_pose', PoseStamped, self.hand_pose_cb)
@@ -35,6 +37,21 @@ class PoseToGazeboPublisher:
         # ===== target link name =====
         self.hand_link_name = 'hand::hand_link'  # ← 実際の link 名に合わせる
         self.eye_link_name  = 'eye::camera_link'
+        self.world_frame = 'world'
+
+    def publish_tf(self, pose, child_frame):
+        tf_msg = TransformStamped()
+        tf_msg.header.stamp = rospy.Time.now()
+        tf_msg.header.frame_id = self.world_frame
+        tf_msg.child_frame_id = child_frame
+        tf_msg.transform.translation.x = pose.position.x
+        tf_msg.transform.translation.y = pose.position.y
+        tf_msg.transform.translation.z = pose.position.z
+        tf_msg.transform.rotation.x = pose.orientation.x
+        tf_msg.transform.rotation.y = pose.orientation.y
+        tf_msg.transform.rotation.z = pose.orientation.z
+        tf_msg.transform.rotation.w = pose.orientation.w
+        self.tf_broadcaster.sendTransform(tf_msg)
 
     def link_states_cb(self, msg):
         if self.hand_link_name in msg.name:
@@ -92,6 +109,7 @@ class PoseToGazeboPublisher:
 
         state.twist = twist
         self.pub.publish(state)
+        self.publish_tf(self.hand_current_pose, self.hand_link_name)
 
     def eye_pose_cb(self, msg):
         # eye は pose 直接指定でも OK（attach しない前提）
@@ -101,6 +119,7 @@ class PoseToGazeboPublisher:
         state.pose = msg.pose
         state.twist = Twist()
         self.pub.publish(state)
+        self.publish_tf(msg.pose, self.eye_link_name)
 
 
 if __name__ == "__main__":

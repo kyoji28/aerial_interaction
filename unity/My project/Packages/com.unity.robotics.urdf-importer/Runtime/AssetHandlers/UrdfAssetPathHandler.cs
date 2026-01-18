@@ -32,6 +32,15 @@ namespace Unity.Robotics.UrdfImporter
 
             packageRoot = GetRelativeAssetPath(newPath);
 
+            // Avoid writing into the Packages/ folder (which can trigger package reimports)
+            // Map package roots under `Packages/...` to `Assets/ROSPackages/...` instead
+            // so created assets live under the project's Assets folder.
+            if (packageRoot.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))
+            {
+                var remainder = packageRoot.Substring("Packages/".Length).TrimStart('/', '\\');
+                packageRoot = Path.Combine("Assets", "ROSPackages", remainder).SetSeparatorChar();
+            }
+
             if (!RuntimeUrdf.AssetDatabase_IsValidFolder(Path.Combine(packageRoot, MaterialFolderName)))
             {
                 RuntimeUrdf.AssetDatabase_CreateFolder(packageRoot, MaterialFolderName);

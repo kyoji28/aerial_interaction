@@ -21,8 +21,8 @@
     </collision>
   </link>
 
-  <!-- <gazebo reference="hand_link">
+  <gazebo reference="hand_link">
     <gravity>false</gravity>
-  </gazebo> -->
+  </gazebo>
 
 </robot>
