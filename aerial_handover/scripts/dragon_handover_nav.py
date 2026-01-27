@@ -21,33 +21,6 @@ class DragonSimpleNav:
         # TF listener for coordinate transformations
         self.tf_listener = tf.TransformListener()
 
-        # Subscribe to robot head pose (continuously updated)
-        self.robot_head_pose_sub = rospy.Subscriber('/robot_head_pose', PoseStamped, self.robot_head_pose_cb)
-
-        # Subscribe to hand pose (continuously updated)
-        self.hand_pose_sub = rospy.Subscriber('/hand_pose', PoseStamped, self.hand_pose_cb)
-
-        # Subscribe to trigger topic to start transformation and navigation
-        self.trigger_sub = rospy.Subscriber('/dragon/trigger_handover', Empty, self.trigger_handover_cb)
-
-        # Subscribe to CoG odometry for navigation feedback
-        self.cog_odom_sub = rospy.Subscriber('/dragon/uav/cog/odom', Odometry, self.cog_odom_cb)
-
-        # Subscribe to dragon joint states
-        self.joint_states_sub = rospy.Subscriber('/dragon/joint_states', JointState, self.joint_states_cb)
-
-        # Publisher for UAV navigation
-        self.uav_nav_pub = rospy.Publisher("/dragon/uav/nav", FlightNav, queue_size=10)
-
-        # Publisher for joint control
-        self.joint_control_pub = rospy.Publisher("/dragon/joints_ctrl", JointState, queue_size=10)
-
-        # Publisher for visualization markers
-        self.marker_pub = rospy.Publisher("/dragon/intermediate_pose_marker", Marker, queue_size=10)
-
-        # Publisher for hand pose at handover trigger
-        self.hand_pose_handover_pub = rospy.Publisher("/hand_pose_handover", PoseStamped, queue_size=10)
-
         # Current joint states
         self.current_joint_positions = None
 
@@ -134,6 +107,19 @@ class DragonSimpleNav:
 
         # Flag to track if we're currently navigating
         self.is_navigating = False
+
+        self.robot_head_pose_sub = rospy.Subscriber('/robot_head_pose', PoseStamped, self.robot_head_pose_cb)
+
+        self.hand_pose_sub = rospy.Subscriber('/hand_pose', PoseStamped, self.hand_pose_cb)
+        self.trigger_sub = rospy.Subscriber('/dragon/trigger_handover', Empty, self.trigger_handover_cb)
+        self.cog_odom_sub = rospy.Subscriber('/dragon/uav/cog/odom', Odometry, self.cog_odom_cb)
+        self.joint_states_sub = rospy.Subscriber('/dragon/joint_states', JointState, self.joint_states_cb)
+
+        self.uav_nav_pub = rospy.Publisher("/dragon/uav/nav", FlightNav, queue_size=10)
+        self.target_pose_pub = rospy.Publisher("/dragon/target_pose", PoseStamped, queue_size=10)
+        self.joint_control_pub = rospy.Publisher("/dragon/joints_ctrl", JointState, queue_size=10)
+        self.marker_pub = rospy.Publisher("/dragon/intermediate_pose_marker", Marker, queue_size=10)
+        self.hand_pose_handover_pub = rospy.Publisher("/hand_pose_handover", PoseStamped, queue_size=10)
 
         rospy.loginfo("DragonSimpleNav initialized. Waiting for trigger messages...")
 
@@ -477,20 +463,22 @@ class DragonSimpleNav:
 
     def publish_navigation_command_intermediate(self):
         """Publish navigation command for intermediate position"""
-        nav_msg = FlightNav()
-        nav_msg.control_frame = FlightNav.WORLD_FRAME
-        nav_msg.target = FlightNav.COG
-        nav_msg.pos_xy_nav_mode = FlightNav.POS_MODE
-        nav_msg.pos_z_nav_mode = FlightNav.POS_MODE
-        nav_msg.yaw_nav_mode = FlightNav.POS_MODE
+        pose_msg = PoseStamped()
+        pose_msg.header.stamp = rospy.Time.now()
+        pose_msg.header.frame_id = "world"
 
-        nav_msg.target_pos_x = self.intermediate_cog_x
-        nav_msg.target_pos_y = self.intermediate_cog_y
-        nav_msg.target_pos_z = self.intermediate_cog_z
-        nav_msg.target_yaw = self.intermediate_cog_yaw
+        pose_msg.pose.position.x = self.intermediate_cog_x
+        pose_msg.pose.position.y = self.intermediate_cog_y
+        pose_msg.pose.position.z = self.intermediate_cog_z
 
-        self.uav_nav_pub.publish(nav_msg)
-        rospy.loginfo("Stage 1: Navigating to intermediate safe position...")
+        quat = tf.transformations.quaternion_from_euler(0, 0, self.intermediate_cog_yaw)
+        pose_msg.pose.orientation.x = quat[0]
+        pose_msg.pose.orientation.y = quat[1]
+        pose_msg.pose.orientation.z = quat[2]
+        pose_msg.pose.orientation.w = quat[3]
+
+        self.target_pose_pub.publish(pose_msg)
+        rospy.loginfo("Stage 1: Navigating to intermediate safe position (via target_pose)...")
 
     def start_navigation(self):
         """Main navigation function - orchestrates the safe approach strategy"""
@@ -968,6 +956,8 @@ class DragonSimpleNav:
         # Check based on current navigation stage
         if self.navigation_stage == 'intermediate':
             return self._check_intermediate_stage(current_cog_x, current_cog_y, current_cog_z, current_yaw)
+        elif self.navigation_stage == 'waiting_at_intermediate':
+            return self._check_waiting_at_intermediate()
         elif self.navigation_stage == 'arc_motion':
             return self._check_arc_motion_stage(current_cog_x, current_cog_y, current_cog_z, current_yaw)
         elif self.navigation_stage == 'comfortable_to_target':
@@ -1016,9 +1006,17 @@ class DragonSimpleNav:
         if self._check_pose_reached(current_x, current_y, current_z, current_yaw,
                                     self.intermediate_cog_x, self.intermediate_cog_y, 
                                     self.intermediate_cog_z, self.intermediate_cog_yaw):
-            rospy.loginfo("Intermediate position reached! Starting arc motion...")
-            self._transition_to_arc_motion()
+            rospy.loginfo("Intermediate position reached! Waiting 3 seconds...")
+            self.navigation_stage = 'waiting_at_intermediate'
+            self.wait_start_time = rospy.Time.now()
             return False
+        return False
+
+    def _check_waiting_at_intermediate(self):
+        """Check if wait time is over"""
+        if (rospy.Time.now() - self.wait_start_time).to_sec() >= 3.0:
+            rospy.loginfo("Wait complete. Starting arc motion...")
+            self._transition_to_arc_motion()
         return False
 
     def _transition_to_arc_motion(self):

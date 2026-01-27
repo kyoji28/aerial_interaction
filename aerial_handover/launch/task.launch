@@ -72,7 +72,7 @@
 
   <node pkg="aerial_handover" type="interactive_marker.py" name="interactive_marker" output="screen" if="$(eval arg('hand_source') == 'marker')">
     <param name="frame_id" value="world" />
-    <remap from="/desired_3D_pose" to="/hand_pose" />
+    <remap from="/desired_3D_pose" to="/hand/mocap/pose" />
   </node>
 
   <node pkg="aerial_handover" type="set_hand_pose_gazebo.py" name="set_hand_pose_gazebo" output="screen" if="$(arg sim)"/>

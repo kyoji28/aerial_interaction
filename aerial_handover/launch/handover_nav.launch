@@ -5,7 +5,7 @@
         <param name="handover_dis_x" value="0.4" />
         <param name="handover_dis_z" value="0.1" />
         <param name="handover_pitch" value="0.0" />
-        <remap from="/desired_3D_pose" to="/hand_pose" />
+        <remap from="/desired_3D_pose" to="/hand/mocap/pose" />
     </node>
 
     <node pkg="aerial_handover" type="dragon_handover_nav.py" name="dragon_handover_nav" output="screen">
