@@ -1,8 +1,65 @@
 #!/usr/bin/env python3
 
 import time
+import math
 import rospy
 from sensor_msgs.msg import JointState
+
+JOINT_NAMES = [
+    "joint1_pitch",
+    "joint1_yaw",
+    "joint2_pitch",
+    "joint2_yaw",
+    "joint3_pitch",
+    "joint3_yaw",
+]
+
+# Joint order:
+# position[0]: joint1_pitch
+# position[1]: joint1_yaw
+# position[2]: joint2_pitch
+# position[3]: joint2_yaw
+# position[4]: joint3_pitch
+# position[5]: joint3_yaw
+#
+# Direction:
+# pitch: positive direction bends the link downward
+# yaw: positive direction bends clockwise when viewed from above
+
+DEG_90 = math.pi / 2.0
+DEG_45 = math.pi / 4.0
+
+POSTURES = {
+    # Stable square posture
+    "square": [0.0, DEG_90, 0.0, DEG_90, 0.0, DEG_90],
+
+    # Basic posture for checking pitch motion
+    "pitch": [0.4, 0.2, 0.4, 0.2, 0.4, 0.2],
+
+    # Basic posture for checking yaw motion
+    "yaw": [0.0, DEG_45, 0.0, DEG_45, 0.0, DEG_45],
+
+    # Combined pitch/yaw posture
+    "combined": [0.4, 0.8, 0.4, 0.8, 0.4, 0.8],
+}
+
+def publish_joint_command(pub, joint_values, duration=2.0):
+    msg = JointState()
+    msg.name = JOINT_NAMES
+    msg.position = joint_values
+
+    rate = rospy.Rate(10)
+    start_time = rospy.Time.now()
+
+    while not rospy.is_shutdown():
+        msg.header.stamp = rospy.Time.now()
+        pub.publish(msg)
+
+        if (rospy.Time.now() - start_time).to_sec() > duration:
+            break
+
+        rate.sleep()
+        
 
 def main():
     rospy.init_node("approach_intention_demo")
@@ -15,25 +72,22 @@ def main():
     # Wait until the publisher is ready
     time.sleep(0.6)
 
-    desire_joint = JointState()
+    posture_name = rospy.get_param("~posture", "square")
 
-    # Minimal posture command for checking whether DRAGON changes posture.
-    # Joint order follows robots/dragon/scripts/transformation_demo.py.
-    desire_joint.position = [-0.4, 1.2, -0.4, 1.2, -0.4, 1.2]
+    if posture_name not in POSTURES:
+        rospy.logerr("Unknown posture: %s", posture_name)
+        rospy.logerr("Available postures: %s", list(POSTURES.keys()))
+        return
 
-    rate = rospy.Rate(10)
-    start_time = rospy.Time.now()
+    rospy.loginfo("Publishing posture: %s", posture_name)
+    rospy.loginfo("Joint values: %s", POSTURES[posture_name])
 
-    while not rospy.is_shutdown():
-        desire_joint.header.stamp = rospy.Time.now()
-        joint_control_pub.publish(desire_joint)
-
-        if (rospy.Time.now() - start_time).to_sec() > 2.0:
-            break
-
-        rate.sleep()
-
-    rospy.loginfo("Published approach intention posture command.")
+    publish_joint_command(
+        joint_control_pub,
+        POSTURES[posture_name],
+        duration=2.0
+        )
+    rospy.loginfo("Finished publishing posture command.")
 
 if __name__ == "__main__":
     main()
