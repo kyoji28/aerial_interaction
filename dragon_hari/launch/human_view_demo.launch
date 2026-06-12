@@ -10,14 +10,15 @@
   <arg name="robot_spawn_z" default="0.0"/>
   <arg name="robot_spawn_yaw" default="0.0"/>
 
-  <!-- ===== Human viewpoint camera settings ===== -->
-  <arg name="spawn_eye" default="true"/>
+  <!-- ===== Human viewpoint model settings ===== -->
+  <arg name="spawn_human" default="true"/>
   <arg name="show_image" default="true"/>
 
-  <arg name="eye_spawn_x" default="-2.0"/>
-  <arg name="eye_spawn_y" default="0.0"/>
-  <arg name="eye_spawn_z" default="1.2"/>
-  <arg name="eye_spawn_yaw" default="0.0"/>
+  <!-- Human stands at x=-2.0 and faces +X direction, toward DRAGON at origin -->
+  <arg name="human_spawn_x" default="-2.0"/>
+  <arg name="human_spawn_y" default="0.0"/>
+  <arg name="human_spawn_z" default="0.0"/>
+  <arg name="human_spawn_yaw" default="0.0"/>
 
   <!-- ===== Bring up DRAGON in Gazebo ===== -->
   <include file="$(find dragon)/launch/bringup.launch" if="$(arg launch_dragon)">
@@ -36,22 +37,22 @@
     <arg name="spawn_yaw" value="$(arg robot_spawn_yaw)"/>
   </include>
 
-  <!-- ===== Spawn human viewpoint camera ===== -->
-  <node name="eye_camera_spawner"
+  <!-- ===== Spawn simple human viewpoint model ===== -->
+  <node name="human_view_model_spawner"
         pkg="gazebo_ros"
         type="spawn_model"
         respawn="false"
         output="screen"
-        if="$(arg spawn_eye)"
-        args="-file $(find aerial_handover)/urdf/eye_camera.urdf.xacro
+        if="$(arg spawn_human)"
+        args="-file $(find dragon_hari)/urdf/human_view_model.urdf.xacro
               -urdf
-              -model eye
-              -x $(arg eye_spawn_x)
-              -y $(arg eye_spawn_y)
-              -z $(arg eye_spawn_z)
-              -Y $(arg eye_spawn_yaw)" />
+              -model human_view_model
+              -x $(arg human_spawn_x)
+              -y $(arg human_spawn_y)
+              -z $(arg human_spawn_z)
+              -Y $(arg human_spawn_yaw)" />
 
-  <!-- ===== Show camera image ===== -->
+  <!-- ===== Show first-person camera image ===== -->
   <node pkg="image_view"
         type="image_view"
         name="eye_image_view"

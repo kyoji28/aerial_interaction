@@ -1,0 +1,222 @@
+<?xml version="1.0"?>
+<robot name="human_view_model" xmlns:xacro="http://ros.org/wiki/xacro">
+
+  <!--
+    Simple human viewpoint model for DRAGON HARI experiments.
+
+    Coordinate convention:
+    - +X direction = human facing direction / camera forward direction
+    - +Z direction = upward
+    - eye_camera_link is attached in front of the head
+  -->
+
+  <!-- Base link -->
+  <link name="human_base_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="1.0"/>
+      <inertia ixx="1e-2" ixy="0" ixz="0" iyy="1e-2" iyz="0" izz="1e-2"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0.02" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.2 0.2 0.04"/>
+      </geometry>
+      <material name="gray">
+        <color rgba="0.5 0.5 0.5 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <!-- Body -->
+  <link name="body_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="5.0"/>
+      <inertia ixx="1e-1" ixy="0" ixz="0" iyy="1e-1" iyz="0" izz="1e-1"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.18" length="1.0"/>
+      </geometry>
+      <material name="body_blue">
+        <color rgba="0.1 0.3 0.8 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <joint name="body_joint" type="fixed">
+    <parent link="human_base_link"/>
+    <child link="body_link"/>
+    <origin xyz="0 0 0.6" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Head -->
+  <link name="head_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="1.0"/>
+      <inertia ixx="1e-2" ixy="0" ixz="0" iyy="1e-2" iyz="0" izz="1e-2"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.14"/>
+      </geometry>
+      <material name="head_skin">
+        <color rgba="0.9 0.75 0.6 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <joint name="head_joint" type="fixed">
+    <parent link="human_base_link"/>
+    <child link="head_link"/>
+    <origin xyz="0 0 1.25" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Face direction marker: protrudes in +X direction -->
+  <link name="face_direction_marker_link">
+    <visual>
+      <!-- Small spherical nose marker on the front surface of the head -->
+      <origin xyz="0.145 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.018"/>
+      </geometry>
+      <material name="face_red">
+        <color rgba="1.0 0.0 0.0 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <joint name="face_direction_marker_joint" type="fixed">
+    <parent link="head_link"/>
+    <child link="face_direction_marker_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Visual-only eyes: no camera function -->
+  <link name="left_eye_visual_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.01"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.018"/>
+      </geometry>
+      <material name="eye_black">
+        <color rgba="0.0 0.0 0.0 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <joint name="left_eye_visual_joint" type="fixed">
+    <parent link="head_link"/>
+    <child link="left_eye_visual_link"/>
+    <origin xyz="0.125 0.055 0.035" rpy="0 0 0"/>
+  </joint>
+
+  <link name="right_eye_visual_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.01"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.018"/>
+      </geometry>
+      <material name="eye_black">
+        <color rgba="0.0 0.0 0.0 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <joint name="right_eye_visual_joint" type="fixed">
+    <parent link="head_link"/>
+    <child link="right_eye_visual_link"/>
+    <origin xyz="0.125 -0.055 0.035" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Eye camera link -->
+  <link name="eye_camera_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.1"/>
+      <inertia ixx="1e-3" ixy="0" ixz="0" iyy="1e-3" iyz="0" izz="1e-3"/>
+    </inertial>
+  </link>
+
+  <joint name="eye_camera_joint" type="fixed">
+    <parent link="head_link"/>
+    <child link="eye_camera_link"/>
+    <origin xyz="0.20 0 0.035" rpy="0 0 0"/>
+  </joint>
+
+  <gazebo reference="left_eye_visual_link">
+    <gravity>false</gravity>
+    <material>Gazebo/Black</material>
+  </gazebo>
+  <gazebo reference="right_eye_visual_link">
+    <gravity>false</gravity>
+    <material>Gazebo/Black</material>
+  </gazebo>
+
+  <!-- Gazebo camera sensor -->
+  <gazebo reference="eye_camera_link">
+
+    <gravity>false</gravity>
+
+    <sensor type="camera" name="head_camera">
+      <update_rate>30</update_rate>
+
+      <camera>
+        <horizontal_fov>1.3962634</horizontal_fov>
+        <image>
+          <width>1280</width>
+          <height>720</height>
+          <format>R8G8B8</format>
+        </image>
+        <clip>
+          <near>0.02</near>
+          <far>50</far>
+        </clip>
+      </camera>
+
+      <always_on>true</always_on>
+      <visualize>false</visualize>
+
+      <plugin name="gazebo_ros_camera" filename="libgazebo_ros_camera.so">
+        <robotNamespace>/</robotNamespace>
+        <frameName>eye_camera_link</frameName>
+        <cameraName>/eye</cameraName>
+        <imageTopicName>image_raw</imageTopicName>
+        <cameraInfoTopicName>camera_info</cameraInfoTopicName>
+        <updateRate>30.0</updateRate>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+  <!-- Keep the model from falling under gravity -->
+  <gazebo reference="human_base_link">
+    <gravity>false</gravity>
+  </gazebo>
+  <gazebo reference="body_link">
+    <gravity>false</gravity>
+    <material>Gazebo/Blue</material>
+  </gazebo>
+  <gazebo reference="head_link">
+    <gravity>false</gravity>
+    <material>Gazebo/Skin</material>
+  </gazebo>
+  <gazebo reference="face_direction_marker_link">
+    <gravity>false</gravity>
+    <material>Gazebo/Red</material>
+  </gazebo>
+
+</robot>
