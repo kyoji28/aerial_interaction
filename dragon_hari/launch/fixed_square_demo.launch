@@ -1,0 +1,46 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="trajectory_mean_vel" default="0.2"/>
+  <arg name="joint_publish_rate" default="10.0"/>
+  <arg name="joint_tolerance" default="0.05"/>
+  <arg name="square_settle_duration" default="1.0"/>
+  <arg name="square_timeout" default="15.0"/>
+  <arg name="state_timeout" default="0.5"/>
+  <arg name="max_goal_distance" default="3.0"/>
+  <arg name="arrival_position_tolerance" default="0.10"/>
+  <arg name="arrival_settle_duration" default="1.0"/>
+  <arg name="motion_timeout" default="60.0"/>
+
+  <arg name="launch_dragon" default="true"/>
+  <arg name="headless" default="false"/>
+  <arg name="show_image" default="true"/>
+
+  <!-- BaseNavigator reads this once during construction. Keep it before the include. -->
+  <param name="/dragon/navigation/trajectory_mean_vel"
+         type="double"
+         value="$(arg trajectory_mean_vel)"/>
+
+  <include file="$(find dragon_hari)/launch/human_view_demo.launch">
+    <arg name="launch_dragon" value="$(arg launch_dragon)"/>
+    <arg name="headless" value="$(arg headless)"/>
+    <arg name="show_image" value="$(arg show_image)"/>
+  </include>
+
+  <node pkg="dragon_hari"
+        type="fixed_square_demo.py"
+        name="fixed_square_demo"
+        output="screen"
+        respawn="false">
+    <param name="trajectory_mean_vel" value="$(arg trajectory_mean_vel)"/>
+    <param name="joint_publish_rate" value="$(arg joint_publish_rate)"/>
+    <param name="joint_tolerance" value="$(arg joint_tolerance)"/>
+    <param name="square_settle_duration" value="$(arg square_settle_duration)"/>
+    <param name="square_timeout" value="$(arg square_timeout)"/>
+    <param name="state_timeout" value="$(arg state_timeout)"/>
+    <param name="max_goal_distance" value="$(arg max_goal_distance)"/>
+    <param name="arrival_position_tolerance"
+           value="$(arg arrival_position_tolerance)"/>
+    <param name="arrival_settle_duration" value="$(arg arrival_settle_duration)"/>
+    <param name="motion_timeout" value="$(arg motion_timeout)"/>
+  </node>
+</launch>
