@@ -2,6 +2,7 @@
 <launch>
   <!-- ===== DRAGON simulation settings ===== -->
   <arg name="launch_dragon" default="true"/>
+  <arg name="simulation" default="true"/>
   <arg name="headless" default="false"/>
   <arg name="worldtype" default="$(find aerial_robot_simulation)/gazebo_model/world/empty.world"/>
 
@@ -23,9 +24,9 @@
   <!-- ===== Bring up DRAGON in Gazebo ===== -->
   <include file="$(find dragon)/launch/bringup.launch" if="$(arg launch_dragon)">
     <arg name="rm" value="False"/>
-    <arg name="sim" value="True"/>
+    <arg name="sim" value="$(arg simulation)"/>
     <arg name="real_machine" value="False"/>
-    <arg name="simulation" value="True"/>
+    <arg name="simulation" value="$(arg simulation)"/>
     <arg name="launch_gazebo" value="True"/>
     <arg name="mujoco" value="False"/>
     <arg name="demo" value="False"/>

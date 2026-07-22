@@ -12,6 +12,7 @@ from geometry_msgs.msg import PointStamped, PoseStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String, UInt8
+from std_srvs.srv import Trigger, TriggerResponse
 
 
 class FixedSquareDemo:
@@ -19,6 +20,7 @@ class FixedSquareDemo:
     HOVER_STATE = 5
 
     IDLE = "IDLE"
+    GOAL_SELECTED = "GOAL_SELECTED"
     PREPARING_SQUARE = "PREPARING_SQUARE"
     MOVING = "MOVING"
 
@@ -102,10 +104,15 @@ class FixedSquareDemo:
         )
 
         self.goal_sub = rospy.Subscriber(
-            "/dragon_hari/demo_goal",
+            "/dragon_hari/fixed_square/goal",
             PoseStamped,
             self._goal_callback,
             queue_size=1,
+        )
+        self.execute_service = rospy.Service(
+            "/dragon_hari/fixed_square/execute",
+            Trigger,
+            self._execute_callback,
         )
         self.cog_odom_sub = rospy.Subscriber(
             "/dragon/uav/cog/odom",
@@ -158,8 +165,10 @@ class FixedSquareDemo:
             )
 
         rospy.loginfo(
-            "Fixed Square demo ready; no robot command is published until a valid "
-            "goal is received while flight_state=%d",
+            "Fixed Square demo ready; select a goal on "
+            "/dragon_hari/fixed_square/goal, then call "
+            "/dragon_hari/fixed_square/execute while flight_state=%d. "
+            "Selecting a goal alone publishes no robot command",
             self.HOVER_STATE,
         )
         self._publish_status("startup")
@@ -239,7 +248,10 @@ class FixedSquareDemo:
         with self._lock:
             self.flight_state = int(message.data)
             self.flight_state_rx_time = rospy.Time.now()
-            if self.mode != self.IDLE and self.flight_state != self.HOVER_STATE:
+            if (
+                self.mode in (self.PREPARING_SQUARE, self.MOVING)
+                and self.flight_state != self.HOVER_STATE
+            ):
                 self._fail_locked(
                     "flight state changed from HOVER to {}".format(
                         self.flight_state
@@ -252,44 +264,61 @@ class FixedSquareDemo:
             self._reject_goal("frame_id is empty")
             return
 
-        position_values = (
-            message.pose.position.x,
-            message.pose.position.y,
-            message.pose.position.z,
-        )
+        position_values = (message.pose.position.x, message.pose.position.y)
         if not all(math.isfinite(value) for value in position_values):
-            self._reject_goal("position contains a non-finite value")
+            self._reject_goal("x or y contains a non-finite value")
             return
 
         with self._lock:
-            rejection = self._goal_state_rejection_locked(rospy.Time.now())
-        if rejection is not None:
-            self._reject_goal(rejection)
-            return
+            if self.mode in (self.PREPARING_SQUARE, self.MOVING):
+                self._reject_goal("execution is already in progress")
+                return
 
         goal_world_xy = self._transform_goal_xy_to_world(message, frame_id)
         if goal_world_xy is None:
             return
 
         with self._lock:
-            now = rospy.Time.now()
-            rejection = self._goal_state_rejection_locked(now)
-            if rejection is not None:
-                self._reject_goal(rejection)
+            if self.mode in (self.PREPARING_SQUARE, self.MOVING):
+                self._reject_goal("execution started while transforming the goal")
                 return
 
-            delta_x = goal_world_xy[0] - self.cog_state[0]
-            delta_y = goal_world_xy[1] - self.cog_state[1]
+            replaced = self.goal_world_xy is not None
+            self.goal_world_xy = goal_world_xy
+            self.mode = self.GOAL_SELECTED
+            rospy.loginfo(
+                "%s Fixed Square goal at world x=%.3f y=%.3f; "
+                "waiting for execute service",
+                "Replaced" if replaced else "Selected",
+                goal_world_xy[0],
+                goal_world_xy[1],
+            )
+            self._publish_status_locked(
+                "goal_replaced" if replaced else "goal_selected"
+            )
+
+    def _execute_callback(self, _request):
+        with self._lock:
+            now = rospy.Time.now()
+            rejection = self._execute_rejection_locked(now)
+            if rejection is not None:
+                rospy.logwarn("Rejected Fixed Square execute request: %s", rejection)
+                self._publish_status_locked("execute_rejected: " + rejection)
+                return TriggerResponse(success=False, message=rejection)
+
+            delta_x = self.goal_world_xy[0] - self.cog_state[0]
+            delta_y = self.goal_world_xy[1] - self.cog_state[1]
             horizontal_distance = math.hypot(delta_x, delta_y)
             if horizontal_distance > self.max_goal_distance:
-                self._reject_goal(
+                rejection = (
                     "horizontal distance {:.3f} m exceeds limit {:.3f} m".format(
                         horizontal_distance, self.max_goal_distance
                     )
                 )
-                return
+                rospy.logwarn("Rejected Fixed Square execute request: %s", rejection)
+                self._publish_status_locked("execute_rejected: " + rejection)
+                return TriggerResponse(success=False, message=rejection)
 
-            self.goal_world_xy = goal_world_xy
             self.square_start_time = now
             self.square_settle_start = None
             self.motion_start_time = None
@@ -298,16 +327,22 @@ class FixedSquareDemo:
             self.start_baselink_yaw = None
             self.mode = self.PREPARING_SQUARE
             rospy.loginfo(
-                "Accepted Fixed Square goal at world x=%.3f y=%.3f; "
+                "Accepted Fixed Square execute request for world x=%.3f y=%.3f; "
                 "preparing Square posture",
-                goal_world_xy[0],
-                goal_world_xy[1],
+                self.goal_world_xy[0],
+                self.goal_world_xy[1],
             )
-            self._publish_status_locked("goal_accepted")
+            self._publish_status_locked("execute_accepted")
+            return TriggerResponse(
+                success=True,
+                message="Fixed Square execution started",
+            )
 
-    def _goal_state_rejection_locked(self, now):
-        if self.mode != self.IDLE:
-            return "another goal is already being processed"
+    def _execute_rejection_locked(self, now):
+        if self.mode in (self.PREPARING_SQUARE, self.MOVING):
+            return "execution is already in progress"
+        if self.mode != self.GOAL_SELECTED or self.goal_world_xy is None:
+            return "no goal is selected"
         if self.flight_state != self.HOVER_STATE:
             return "flight state is not HOVER ({})".format(self.flight_state)
         stale = self._missing_or_stale_states_locked(now)
@@ -329,7 +364,9 @@ class FixedSquareDemo:
         point = PointStamped()
         point.header.stamp = message.header.stamp
         point.header.frame_id = normalized_frame
-        point.point = message.pose.position
+        point.point.x = message.pose.position.x
+        point.point.y = message.pose.position.y
+        point.point.z = 0.0
         try:
             transformed = self.tf_buffer.transform(
                 point, "world", rospy.Duration(self.tf_timeout)
@@ -350,7 +387,7 @@ class FixedSquareDemo:
 
     def _control_tick(self, _event):
         with self._lock:
-            if self.mode == self.IDLE:
+            if self.mode in (self.IDLE, self.GOAL_SELECTED):
                 return
 
             now = rospy.Time.now()
@@ -451,6 +488,7 @@ class FixedSquareDemo:
 
         self._log_motion_errors_locked("Fixed Square goal succeeded")
         self.mode = self.IDLE
+        self._clear_goal_locked()
         self._publish_status_locked("success")
         rospy.loginfo("Fixed Square goal complete; joint command publishing stopped")
 
@@ -510,6 +548,7 @@ class FixedSquareDemo:
     def _fail_locked(self, reason):
         rospy.logerr("Fixed Square execution failed: %s", reason)
         self.mode = self.IDLE
+        self._clear_goal_locked()
         self.square_settle_start = None
         self.arrival_settle_start = None
         self._publish_status_locked("failure: " + reason)
@@ -517,6 +556,9 @@ class FixedSquareDemo:
             "Joint command publishing stopped; no navigation cancellation, landing, "
             "or other recovery command was sent"
         )
+
+    def _clear_goal_locked(self):
+        self.goal_world_xy = None
 
     def _reject_goal(self, reason):
         rospy.logwarn("Rejected Fixed Square goal: %s", reason)
@@ -533,11 +575,21 @@ class FixedSquareDemo:
     def _publish_status_locked(self, detail):
         now = rospy.Time.now()
         ready = not self._missing_or_stale_states_locked(now)
+        goal_selected = self.goal_world_xy is not None
+        if goal_selected:
+            goal_x = "{:.6f}".format(self.goal_world_xy[0])
+            goal_y = "{:.6f}".format(self.goal_world_xy[1])
+        else:
+            goal_x = "none"
+            goal_y = "none"
         message = String()
         message.data = (
-            "state={} flight_state={} state_fresh={} navigation_goals_sent={} "
-            "detail={}".format(
+            "state={} goal_selected={} goal_x={} goal_y={} flight_state={} "
+            "state_fresh={} navigation_goals_sent={} detail={}".format(
                 self.mode,
+                str(goal_selected).lower(),
+                goal_x,
+                goal_y,
                 self.flight_state,
                 str(ready).lower(),
                 self.navigation_goal_count,

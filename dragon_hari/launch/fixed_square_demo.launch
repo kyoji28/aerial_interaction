@@ -12,8 +12,12 @@
   <arg name="motion_timeout" default="60.0"/>
 
   <arg name="launch_dragon" default="true"/>
+  <arg name="simulation" default="true"/>
   <arg name="headless" default="false"/>
   <arg name="show_image" default="true"/>
+  <arg name="spawn_human" default="true"/>
+  <arg name="launch_rviz" default="true"/>
+  <arg name="launch_gazebo_gui" default="true"/>
 
   <!-- BaseNavigator reads this once during construction. Keep it before the include. -->
   <param name="/dragon/navigation/trajectory_mean_vel"
@@ -22,9 +26,27 @@
 
   <include file="$(find dragon_hari)/launch/human_view_demo.launch">
     <arg name="launch_dragon" value="$(arg launch_dragon)"/>
-    <arg name="headless" value="$(arg headless)"/>
+    <arg name="simulation" value="$(arg simulation)"/>
+    <!-- Suppress the upstream RViz and Gazebo GUI. The dedicated instances below
+         keep the Fixed Square RViz topic configuration under this package. -->
+    <arg name="headless" value="true"/>
     <arg name="show_image" value="$(arg show_image)"/>
+    <arg name="spawn_human" value="$(arg spawn_human)"/>
   </include>
+
+  <node pkg="gazebo_ros"
+        type="gzclient"
+        name="fixed_square_gazebo_gui"
+        output="screen"
+        if="$(eval arg('launch_dragon') and arg('simulation') and arg('launch_gazebo_gui') and not arg('headless'))"/>
+
+  <node pkg="rviz"
+        type="rviz"
+        name="fixed_square_rviz"
+        args="-d $(find dragon_hari)/rviz/fixed_square_demo.rviz"
+        output="screen"
+        respawn="false"
+        if="$(eval arg('launch_rviz') and not arg('headless'))"/>
 
   <node pkg="dragon_hari"
         type="fixed_square_demo.py"
