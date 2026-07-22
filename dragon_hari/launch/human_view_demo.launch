@@ -5,7 +5,7 @@
   <arg name="simulation" default="true"/>
   <arg name="headless" default="false"/>
   <arg name="worldtype" default="$(find aerial_robot_simulation)/gazebo_model/world/empty.world"/>
-
+  <arg name="trajectory_mean_vel" default="0.2"/>
   <arg name="robot_spawn_x" default="0.0"/>
   <arg name="robot_spawn_y" default="0.0"/>
   <arg name="robot_spawn_z" default="0.0"/>
@@ -22,6 +22,11 @@
   <arg name="human_spawn_yaw" default="0.0"/>
 
   <!-- ===== Bring up DRAGON in Gazebo ===== -->
+  <!-- BaseNavigator reads this parameter during startup -->
+  <param name="/dragon/navigation/trajectory_mean_vel"
+         type="double"
+         value="$(arg trajectory_mean_vel)"/>
+
   <include file="$(find dragon)/launch/bringup.launch" if="$(arg launch_dragon)">
     <arg name="rm" value="False"/>
     <arg name="sim" value="$(arg simulation)"/>
