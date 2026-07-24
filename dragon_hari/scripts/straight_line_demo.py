@@ -246,22 +246,27 @@ class StraightLineDemo:
             msg.pose.pose.orientation
         )
 
-def read_command():
-    valid_modes = ("fixed_square", "vertex_forward")
+MODE_MAP = {
+    "1": "fixed_square",
+    "2": "vertex_forward",
+}
 
+def read_command():
     while not rospy.is_shutdown():
-        mode = input(
+        selection = input(
             "\nSelect mode "
-            "[fixed_square / vertex_forward / q]: "
+            "[1: fixed_square / 2: vertex_forward / q: quit]: "
         ).strip()
 
-        if mode == "q":
+        if selection == "q":
             return None
 
-        if mode in valid_modes:
+        mode = MODE_MAP.get(selection)
+
+        if mode is not None:
             break
 
-        print("Invalid mode.")
+        print("Invalid mode. Enter 1, 2, or q.")
 
     while not rospy.is_shutdown():
         try:
