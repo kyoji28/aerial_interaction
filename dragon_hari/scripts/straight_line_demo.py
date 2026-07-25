@@ -7,16 +7,12 @@ from sensor_msgs.msg import JointState
 
 
 class StraightLineDemo:
-    SQUARE_PUBLISH_DURATION_SEC = 2.0
-    SQUARE_PUBLISH_RATE_HZ = 10.0
-
+    
     YAW_ALIGNMENT_TOLERANCE_RAD = math.radians(5.0)
     YAW_ALIGNMENT_CHECK_RATE_HZ = 20.0
 
     POSITION_TOLERANCE_M = 0.10
     POSITION_CHECK_RATE_HZ = 20.0
-
-
 
     JOINT_NAMES = (
         "joint1_pitch",
@@ -36,7 +32,18 @@ class StraightLineDemo:
         math.pi / 2.0,
     )
 
+    LINK4_FORWARD_POSITIONS = (
+        0.0,
+        math.pi /2.0,
+        0.0,
+        math.pi / 2.0,
+        0.0,
+        -math.pi / 4.0,
+    )
+
     V14_YAW_OFFSET = 3.0 * math.pi / 4.0
+    LINK4_YAW_OFFSET = math.pi / 4.0
+
 
     def __init__(self):
         self.cog_x = None
@@ -72,13 +79,23 @@ class StraightLineDemo:
             queue_size=1,
         )
 
-    def publish_square_command(self):
+    def publish_joint_command(self, positions):
         command = JointState()
         command.header.stamp = rospy.Time.now()
         command.name = list(self.JOINT_NAMES)
-        command.position = list(self.SQUARE_POSITIONS)
+        command.position = list(positions)
 
         self.joint_command_pub.publish(command)
+
+
+    def move_to_posture(self, positions, posture_name):
+        rospy.loginfo(
+            "Moving to %s posture.",
+            posture_name,
+        )
+
+        self.publish_joint_command(positions)
+
 
     def move_to_square(self):
         rate = rospy.Rate(self.SQUARE_PUBLISH_RATE_HZ)
