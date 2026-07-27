@@ -7,16 +7,12 @@ from sensor_msgs.msg import JointState
 
 
 class StraightLineDemo:
-    SQUARE_PUBLISH_DURATION_SEC = 2.0
-    SQUARE_PUBLISH_RATE_HZ = 10.0
 
     YAW_ALIGNMENT_TOLERANCE_RAD = math.radians(5.0)
     YAW_ALIGNMENT_CHECK_RATE_HZ = 20.0
 
     POSITION_TOLERANCE_M = 0.10
     POSITION_CHECK_RATE_HZ = 20.0
-
-
 
     JOINT_NAMES = (
         "joint1_pitch",
@@ -36,7 +32,20 @@ class StraightLineDemo:
         math.pi / 2.0,
     )
 
+    LINK4_FORWARD_POSITIONS = (
+        0.0,
+        math.pi / 2.0,
+        0.0,
+        math.pi / 2.0,
+        0.0,
+        -math.pi / 4.0,
+    )
+
     V14_YAW_OFFSET = 3.0 * math.pi / 4.0
+    LINK4_YAW_OFFSET = math.pi / 4.0
+
+    POSUTRE_SETTLING_TIME_SEC = 2.0
+
 
     def __init__(self):
         self.cog_x = None
@@ -72,32 +81,46 @@ class StraightLineDemo:
             queue_size=1,
         )
 
-    def publish_square_command(self):
+    def publish_joint_command(self, positions):
         command = JointState()
         command.header.stamp = rospy.Time.now()
         command.name = list(self.JOINT_NAMES)
-        command.position = list(self.SQUARE_POSITIONS)
+        command.position = list(positions)
 
         self.joint_command_pub.publish(command)
 
-    def move_to_square(self):
-        rate = rospy.Rate(self.SQUARE_PUBLISH_RATE_HZ)
-        end_time = (
-            rospy.Time.now()
-            + rospy.Duration(self.SQUARE_PUBLISH_DURATION_SEC)
+
+    def move_to_posture(self, positions, posture_name):
+        rospy.loginfo(
+            "Moving to %s posture.",
+            posture_name,
         )
+
+        self.publish_joint_command(positions)
 
         rospy.loginfo(
-            "Publishing Square posture command for %.1f seconds.",
-            self.SQUARE_PUBLISH_DURATION_SEC,
+            "Waiting %.1f seconds for posture settling.",
         )
 
-        while not rospy.is_shutdown() and rospy.Time.now() < end_time:
-            self.publish_square_command()
-            rate.sleep()
-        
-        rospy.loginfo("Square posture command publishing completed.")
-    
+        rospy.sleep(self.POSUTRE_SETTLING_TIME_SEC)
+
+        rospy.loginfo(
+            "%s posture settling completed.",
+            posture_name,
+        )
+
+
+    def move_to_square(self):
+        self.move_to_posture(
+            self.SQUARE_POSITIONS,
+            "Square",
+        )
+
+    def move_to_link4_forward_posture(self):
+        self.move_to_posture(
+            self.LINK4_FORWARD_POSITIONS,
+            "Link4-forward",
+        )
 
     def publish_navigation_goal(self, x, y, z, yaw):
         goal = PoseStamped()
@@ -137,6 +160,29 @@ class StraightLineDemo:
         return self.normalize_angle(
             travel_yaw - self.V14_YAW_OFFSET
         )
+
+    def calculate_link4_forward_yaw(self, goal_x, goal_y):
+        travel_yaw = math.atan2(
+            goal_y - self.cog_y,
+            goal_x - self.cog_x,
+        )
+
+        target_baselink_yaw = self.normalize_angle(
+            travel_yaw - self.LINK4_YAW_OFFSET
+        )
+
+        rospy.loginfo(
+            "Link4-forward yaw: "
+            "travel=%.3f rad, "
+            "offset=%.3f rad, "
+            "target_baselink=%.3f rad",
+            travel_yaw,
+            self.LINK4_YAW_OFFSET,
+            target_baselink_yaw,
+        )
+
+        return target_baselink_yaw
+
 
     def align_yaw(self, target_yaw):
         self.publish_navigation_goal(
@@ -234,7 +280,26 @@ class StraightLineDemo:
             rospy.loginfo("vertex_forward demo completed.")
 
         return completed
-    
+
+    def run_link4_forward(self, goal_x, goal_y):
+        rospy.loginfo("Starting link4_forward demo.")
+
+        self.move_to_link4_forward_posture()
+
+        target_yaw = self.calculate_link4_forward_yaw(
+            goal_x,
+            goal_y,
+        )
+
+        if not self.align_yaw(target_yaw):
+            return False
+
+        completed = self.move_to_goal(goal_x, goal_y)
+
+        if completed:
+            rospy.loginfo("link4_forward demo completed.")
+
+        return completed
     
     def cog_odom_callback(self, msg):
         self.cog_x = msg.pose.pose.position.x
@@ -246,22 +311,31 @@ class StraightLineDemo:
             msg.pose.pose.orientation
         )
 
-def read_command():
-    valid_modes = ("fixed_square", "vertex_forward")
+MODE_MAP = {
+    "1": "fixed_square",
+    "2": "vertex_forward",
+    "3": "link4_forward",
+}
 
+def read_command():
     while not rospy.is_shutdown():
-        mode = input(
+        selection = input(
             "\nSelect mode "
-            "[fixed_square / vertex_forward / q]: "
+            "[1: fixed_square / "
+            "2: vertex_forward / "
+            "3: link4_forward / "
+            "q: quit]: "
         ).strip()
 
-        if mode == "q":
+        if selection == "q":
             return None
 
-        if mode in valid_modes:
+        mode = MODE_MAP.get(selection)
+
+        if mode is not None:
             break
 
-        print("Invalid mode.")
+        print("Invalid mode. Enter 1, 2, 3, or q.")
 
     while not rospy.is_shutdown():
         try:
@@ -302,6 +376,9 @@ def main():
 
         elif mode == "vertex_forward":
             node.run_vertex_forward(goal_x, goal_y)
+
+        elif mode == "link4_forward":
+            node.run_link4_forward(goal_x, goal_y)
 
     rospy.loginfo("Straight_line_demo terminated.")
 
