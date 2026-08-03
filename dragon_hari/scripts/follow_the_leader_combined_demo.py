@@ -12,13 +12,13 @@ from tf.transformations import euler_from_quaternion
 from follow_the_leader_cog_mapping import (
     calculate_cog_pose,
 )
-from follow_the_leader_geometry import (
+from dragon_hari.motions.follow_the_leader.geometry import (
     normalize_angle,
 )
 from follow_the_leader_joint_demo import (
     FollowTheLeaderJointDemo,
 )
-from follow_the_leader_trajectory import (
+from dragon_hari.motions.follow_the_leader.trajectory import (
     build_timed_trajectory,
 )
 

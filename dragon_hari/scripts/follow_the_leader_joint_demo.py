@@ -7,7 +7,7 @@ import time
 import rospy
 from sensor_msgs.msg import JointState
 
-from follow_the_leader_trajectory import (
+from dragon_hari.motions.follow_the_leader.trajectory import (
     JOINT_NAMES,
     build_timed_trajectory,
 )

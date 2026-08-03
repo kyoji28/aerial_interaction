@@ -8,16 +8,16 @@ import rospy
 import tf2_ros
 from tf.transformations import euler_from_quaternion
 
-from follow_the_leader_geometry import (
+from dragon_hari.motions.follow_the_leader.geometry import (
     normalize_angle,
 )
 from follow_the_leader_joint_demo import (
     FollowTheLeaderJointDemo,
 )
-from follow_the_leader_path import (
+from dragon_hari.motions.follow_the_leader.path import (
     calculate_distance,
 )
-from follow_the_leader_trajectory import (
+from dragon_hari.motions.follow_the_leader.trajectory import (
     build_timed_trajectory,
 )
 

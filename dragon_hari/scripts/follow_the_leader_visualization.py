@@ -2,7 +2,7 @@
 
 import matplotlib.pyplot as plt
 
-from follow_the_leader_path import (
+from dragon_hari.motions.follow_the_leader.path import (
     calculate_follow_the_leader_sequence,
     generate_sine_path,
 )
