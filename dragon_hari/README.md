@@ -1,84 +1,68 @@
 # dragon_hari
 
-ROS package for developing and evaluating communicative body behaviors of DRAGON for Human-Aerial Robot Interaction.
+ROS1 package for developing and evaluating whole-body behaviors of the
+DRAGON multilink aerial robot for Human-Aerial Robot Interaction.
 
-## Purpose
+## Package structure
 
-This package is used for the master's research on communicative behaviors using a multi-link aerial robot.
+```text
+dragon_hari/
+├── scripts/                  # Executable ROS nodes
+├── src/dragon_hari/          # Importable Python modules
+│   └── motions/
+│       └── follow_the_leader/
+├── launch/
+├── config/
+├── rviz/
+└── urdf/
+```
 
-## Fixed Square simulation demo
+The follow-the-leader implementation is separated into:
 
-The Fixed Square demo moves DRAGON horizontally while maintaining the Square
-joint posture, the current CoG height, and the current CoG yaw. It is intended
-for Gazebo simulation only.
+- `geometry.py`: planar geometry and joint-angle calculation
+- `path.py`: reference-path and follow-the-leader shape generation
+- `timing.py`: path resampling and temporal processing
+- `trajectory.py`: timed joint-trajectory generation
+- `joint_player.py`: joint-state reception and joint-command playback
+- `pose.py`: CoG pose and quaternion/yaw utilities
 
-### Build and launch
-
-Build and source the research workspace:
+## Build
 
 ```bash
-source ~/ros/jsk_aerial_robot_ws/devel/setup.bash
 cd ~/ros/human_robot_interaction_ws
-catkin build dragon_hari --no-deps
+catkin build dragon_hari
 source devel/setup.bash
 ```
 
-Start the DRAGON simulation first:
+## Follow-the-leader nodes
+
+### Joint-command playback only
 
 ```bash
-roslaunch dragon_hari human_view_demo.launch
+rosrun dragon_hari follow_the_leader_joint_demo.py
 ```
 
-Arm DRAGON and take off using the standard simulation commands:
+### CoG mapping and validation
 
 ```bash
-rostopic pub -1 /dragon/teleop_command/start std_msgs/Empty "{}"
-rostopic echo /dragon/flight_state
+rosrun dragon_hari follow_the_leader_cog_mapping.py
 ```
 
-Wait for `data: 2` (ARM_ON), stop the echo with Ctrl-C, and then take off:
+### Synchronized joint and CoG motion
 
 ```bash
-rostopic pub -1 /dragon/teleop_command/takeoff std_msgs/Empty "{}"
-rostopic echo /dragon/flight_state
+rosrun dragon_hari follow_the_leader_combined_demo.py
 ```
 
-Wait for `data: 5` (HOVER) and stop the echo with Ctrl-C.
+## Other executable nodes
 
-In another sourced terminal, start the Fixed Square node separately:
+- `approach_intention_demo.py`
+- `joint_angle_input.py`
+- `smooth_straight.py`
+- `snake_hover_demo.py`
+- `straight_line_demo.py`
 
-```bash
-source ~/ros/jsk_aerial_robot_ws/devel/setup.bash
-source ~/ros/human_robot_interaction_ws/devel/setup.bash
-rosrun dragon_hari fixed_square_demo.py
-```
+## Analysis
 
-At the terminal prompt, enter one absolute destination in the `world` frame as
-two values in metres:
-
-```text
-Enter target x y [m] in world: 0.8 0.3
-```
-
-To inspect the current position before entering the destination, use:
-
-```bash
-rostopic echo -n 1 /dragon/uav/cog/odom
-```
-
-After input, Square preparation and movement start automatically. Once the
-Square posture has settled, the node publishes exactly one goal to
-`/dragon/target_pose`. The goal z and yaw are taken from the current CoG state
-immediately before publication.
-
-During movement, the node continuously publishes the Square posture to
-`/dragon/joints_ctrl`. The destination is considered reached after the horizontal
-error remains within `0.10` m for `1.0` s. Joint command publication then stops
-and the node exits. If the vehicle leaves HOVER or required state data is lost,
-joint command publication also stops and the node exits.
-
-After the demo, land with:
-
-```bash
-rostopic pub -1 /dragon/teleop_command/land std_msgs/Empty "{}"
-```
+`follow_the_leader_visualization.py` is an offline visualization script and is
+not installed as a ROS executable.
