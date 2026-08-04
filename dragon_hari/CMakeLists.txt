@@ -167,11 +167,8 @@ include_directories(
 ## in contrast to setup.py, you can choose the destination
 catkin_install_python(PROGRAMS
   scripts/approach_intention_demo.py
-  scripts/follow_the_leader_cog_mapping.py
-  scripts/follow_the_leader_combined_demo.py
-  scripts/follow_the_leader_joint_demo.py
+  scripts/follow_the_leader.py
   scripts/joint_angle_input.py
-  scripts/snake_hover_demo.py
   scripts/straight_line_body_wave.py
   scripts/straight_line_demo.py
   scripts/straight_line_fixed_square.py
