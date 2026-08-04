@@ -15,7 +15,7 @@ from follow_the_leader_cog_mapping import (
 from dragon_hari.motions.follow_the_leader.geometry import (
     normalize_angle,
 )
-from follow_the_leader_joint_demo import (
+from dragon_hari.motions.follow_the_leader.joint_player import (
     FollowTheLeaderJointDemo,
 )
 from dragon_hari.motions.follow_the_leader.trajectory import (
