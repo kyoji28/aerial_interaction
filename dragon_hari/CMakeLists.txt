@@ -165,8 +165,17 @@ include_directories(
 
 ## Mark executable scripts (Python etc.) for installation
 ## in contrast to setup.py, you can choose the destination
-# Python executable installation will be defined after
-# the scripts/modules structure is finalized.
+catkin_install_python(PROGRAMS
+  scripts/approach_intention_demo.py
+  scripts/follow_the_leader_cog_mapping.py
+  scripts/follow_the_leader_combined_demo.py
+  scripts/follow_the_leader_joint_demo.py
+  scripts/joint_angle_input.py
+  scripts/smooth_straight.py
+  scripts/snake_hover_demo.py
+  scripts/straight_line_demo.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
 
 install(DIRECTORY
   launch
