@@ -67,7 +67,7 @@ def transform_plan_pose_to_world(
     return world_x, world_y, world_yaw
 
 
-class FollowTheLeaderCombinedDemo:
+class FollowTheLeader:
     def __init__(self):
         self.joint_demo = (
             FollowTheLeaderJointDemo()
@@ -433,7 +433,7 @@ class FollowTheLeaderCombinedDemo:
 
             if sample_index % log_interval == 0:
                 rospy.loginfo(
-                    "Combined playback: "
+                    "Follow-the-leader playback: "
                     "%.2f / %.2f s",
                     command["time"],
                     playback_duration,
@@ -446,7 +446,7 @@ class FollowTheLeaderCombinedDemo:
             or last_target is None
         ):
             raise RuntimeError(
-                "No combined trajectory "
+                "No follow-the-leader trajectory "
                 "sample was published."
             )
 
@@ -508,7 +508,7 @@ class FollowTheLeaderCombinedDemo:
 
 def main():
     rospy.init_node(
-        "follow_the_leader_combined_demo"
+        "follow_the_leader"
     )
 
     end_tip_speed = rospy.get_param(
@@ -576,7 +576,7 @@ def main():
         control_rate=control_rate,
     )
 
-    demo = FollowTheLeaderCombinedDemo()
+    demo = FollowTheLeader()
 
     current_joint_positions = (
         demo.joint_demo.wait_for_joint_states(
@@ -602,7 +602,7 @@ def main():
     )
 
     rospy.loginfo(
-        "Starting combined follow-the-leader "
+        "Starting follow-the-leader "
         "playback for %.2f seconds.",
         playback_duration,
     )
@@ -620,7 +620,7 @@ def main():
     )
 
     rospy.loginfo(
-        "Combined follow-the-leader "
+        "Follow-the-leader "
         "playback completed."
     )
 
