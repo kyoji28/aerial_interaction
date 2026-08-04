@@ -58,9 +58,12 @@ rosrun dragon_hari follow_the_leader_combined_demo.py
 
 - `approach_intention_demo.py`
 - `joint_angle_input.py`
-- `smooth_straight.py`
 - `snake_hover_demo.py`
-- `straight_line_demo.py`
+- `straight_line_demo.py`: interactive launcher for the straight-line demos
+- `straight_line_fixed_square.py`: straight motion with a fixed square posture
+- `straight_line_vertex_forward.py`: straight motion with a vertex facing forward
+- `straight_line_link4_forward.py`: straight motion with Link 4 facing forward
+- `straight_line_body_wave.py`: straight motion with a body-wave joint motion
 
 ## Analysis
 
