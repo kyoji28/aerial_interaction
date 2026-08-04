@@ -2,10 +2,10 @@
 
 import math
 
-from follow_the_leader_geometry import (
+from .geometry import (
     normalize_angle,
 )
-from follow_the_leader_path import (
+from .path import (
     calculate_distance,
     calculate_follow_the_leader_sequence,
     generate_sine_path,

@@ -26,7 +26,7 @@ find_package(catkin REQUIRED COMPONENTS
 ## Uncomment this if the package has a setup.py. This macro ensures
 ## modules and global scripts declared therein get installed
 ## See http://ros.org/doc/api/catkin/html/user_guide/setup_dot_py.html
-# catkin_python_setup()
+catkin_python_setup()
 
 ################################################
 ## Declare ROS messages, services and actions ##
@@ -166,7 +166,14 @@ include_directories(
 ## Mark executable scripts (Python etc.) for installation
 ## in contrast to setup.py, you can choose the destination
 catkin_install_python(PROGRAMS
-  scripts/fixed_square_demo.py
+  scripts/approach_intention_demo.py
+  scripts/follow_the_leader_cog_mapping.py
+  scripts/follow_the_leader_combined_demo.py
+  scripts/follow_the_leader_joint_demo.py
+  scripts/joint_angle_input.py
+  scripts/smooth_straight.py
+  scripts/snake_hover_demo.py
+  scripts/straight_line_demo.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

@@ -2,7 +2,7 @@
 
 import math
 
-from follow_the_leader_geometry import (
+from .geometry import (
     LINK_BODY_LENGTH_M,
     LINK_ORIGIN_SPACING_M,
     calculate_joint_yaws_from_points,

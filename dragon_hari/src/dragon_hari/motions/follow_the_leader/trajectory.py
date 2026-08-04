@@ -3,16 +3,16 @@
 import csv
 import math
 
-from follow_the_leader_geometry import (
+from .geometry import (
     calculate_joint_yaws_from_points,
     normalize_angle,
 )
-from follow_the_leader_path import (
+from .path import (
     calculate_distance,
     calculate_follow_the_leader_sequence,
     generate_sine_path,
 )
-from follow_the_leader_timing import (
+from .timing import (
     remove_short_final_interval,
     resample_path_by_arc_length,
 )

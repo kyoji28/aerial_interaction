@@ -7,18 +7,18 @@ import rospy
 import tf2_ros
 
 from aerial_robot_msgs.msg import FlightNav
-from tf.transformations import euler_from_quaternion
 
-from follow_the_leader_cog_mapping import (
+from dragon_hari.motions.follow_the_leader.pose import (
     calculate_cog_pose,
+    quaternion_to_yaw,
 )
-from follow_the_leader_geometry import (
+from dragon_hari.motions.follow_the_leader.geometry import (
     normalize_angle,
 )
-from follow_the_leader_joint_demo import (
+from dragon_hari.motions.follow_the_leader.joint_player import (
     FollowTheLeaderJointDemo,
 )
-from follow_the_leader_trajectory import (
+from dragon_hari.motions.follow_the_leader.trajectory import (
     build_timed_trajectory,
 )
 
@@ -28,19 +28,6 @@ NAV_TOPIC = "/dragon/uav/nav"
 WORLD_FRAME = "world"
 LINK1_FRAME = "dragon/link1"
 COG_FRAME = "dragon/cog"
-
-
-def quaternion_to_yaw(quaternion):
-    _, _, yaw = euler_from_quaternion(
-        [
-            quaternion.x,
-            quaternion.y,
-            quaternion.z,
-            quaternion.w,
-        ]
-    )
-
-    return yaw
 
 
 def clamp(value, minimum, maximum):
