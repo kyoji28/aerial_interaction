@@ -171,9 +171,12 @@ catkin_install_python(PROGRAMS
   scripts/follow_the_leader_combined_demo.py
   scripts/follow_the_leader_joint_demo.py
   scripts/joint_angle_input.py
-  scripts/smooth_straight.py
   scripts/snake_hover_demo.py
+  scripts/straight_line_body_wave.py
   scripts/straight_line_demo.py
+  scripts/straight_line_fixed_square.py
+  scripts/straight_line_link4_forward.py
+  scripts/straight_line_vertex_forward.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
