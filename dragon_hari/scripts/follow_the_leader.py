@@ -446,7 +446,7 @@ class FollowTheLeader:
             or last_target is None
         ):
             raise RuntimeError(
-                "No follow-the-leader trajectory "
+                "No combined trajectory "
                 "sample was published."
             )
 
@@ -620,7 +620,7 @@ def main():
     )
 
     rospy.loginfo(
-        "Follow-the-leader "
+        "follow-the-leader "
         "playback completed."
     )
 
