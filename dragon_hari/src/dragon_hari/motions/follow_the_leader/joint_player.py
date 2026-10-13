@@ -14,7 +14,7 @@ JOINT_COMMAND_TOPIC = "/dragon/joints_ctrl"
 JOINT_STATE_TOPIC = "/dragon/joint_states"
 
 
-class FollowTheLeaderJointDemo:
+class FollowTheLeaderJointPlayer:
     def __init__(self):
         self.joint_positions = {}
         self.joint_state_lock = threading.Lock()
