@@ -148,7 +148,14 @@ class GripperKeyboardTeleop:
             return
 
         # Use the current positions as the first targets.
-        # This prevents an unintended jump when torque is enabled.
+        #
+        # IMPORTANT:
+        # Do NOT publish torque_enable = 1 here.
+        # In the current DirectServo firmware, publishing a target position
+        # while torque is OFF sets the goal position first and then enables
+        # torque automatically. This avoids the separate torque-enable path
+        # that caused an approximately one-revolution jump in Extended
+        # Position Control Mode.
         for index in [self.LOWER_JAW, self.UPPER_JAW]:
             self.target[index] = self.current[index]
 
@@ -158,20 +165,6 @@ class GripperKeyboardTeleop:
         ])
 
         rospy.sleep(0.1)
-
-        msg = ServoTorqueCmd()
-
-        msg.index = [
-            self.LOWER_JAW,
-            self.UPPER_JAW,
-        ]
-
-        msg.torque_enable = [
-            1,
-            1,
-        ]
-
-        self.torque_pub.publish(msg)
 
         self.torque_on = True
 
