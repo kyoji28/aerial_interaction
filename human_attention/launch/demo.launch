@@ -1,0 +1,13 @@
+<launch>
+  <!-- USBカメラ -->
+  <node pkg="usb_cam" type="usb_cam_node" name="usb_cam" output="log" />
+  
+  <!-- 顔の向きから注目状態を推定 -->
+  <node pkg="human_attention" type="face_attention_node.py" name="face_attention" output="log" />
+
+  <!-- 内部状態sを計算 -->
+  <node pkg="human_attention" type="internal_state_node.py" name="internal_state" output="log" />
+
+  <!-- 内部状態sからDゲインを変更 -->
+  <node pkg="human_attention" type="gain_scheduler_node.py" name="gain_scheduler" output="screen" />
+</launch>
