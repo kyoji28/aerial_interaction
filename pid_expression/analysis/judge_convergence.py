@@ -1,330 +1,177 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""DRAGONのXYステップ応答をROS1 rosbagからOK / NG / 未判定に分類する。
-
-デフォルトのOK条件:
-  1. 指令後0～30秒の位置データが取得できる。
-  2. 指令後20～30秒の間、X・Yそれぞれの位置誤差が常に±0.2 m以内。
-  3. 指令後0～30秒の最大オーバーシュートが200%以内。
-
-使い方:
-  python3 judge_convergence.py experiment.bag
-  python3 judge_convergence.py experiment.bag --tolerance 0.1
-  python3 judge_convergence.py experiment.bag --json
-
-位置誤差はXY合成距離ではなく、各軸の目標位置との差の絶対値で判定する。
-"""
+"""DRAGONのCoG XYステップ応答の動作終了判定（ROS1 rosbag）。"""
 
 import argparse
-import bisect
-import json
-import math
-import sys
 from pathlib import Path
 
+import numpy as np
+from scipy.signal import savgol_filter
 
 NAV_TOPIC = "/dragon/uav/nav"
 ODOM_TOPIC = "/dragon/uav/cog/odom"
 
-
-def interpolate_position(samples, t):
-    """時系列(t, x, y)から、時刻tの位置を線形補間する。"""
-    times = [row[0] for row in samples]
-    i = bisect.bisect_left(times, t)
-
-    if i < len(samples) and samples[i][0] == t:
-        return samples[i][1:]
-    if i == 0 or i == len(samples):
-        return None
-
-    t0, x0, y0 = samples[i - 1]
-    t1, x1, y1 = samples[i]
-    if t1 <= t0:
-        return None
-
-    ratio = (t - t0) / (t1 - t0)
-    return x0 + ratio * (x1 - x0), y0 + ratio * (y1 - y0)
+DURATION = 30.0       # 指令後の評価時間 [s]
+POSITION_TOL = 0.10   # X・Y各軸の位置誤差 [m]
+SPEED_TOL = 0.05      # 2秒間のXY速度RMS上限 [m/s]
+HOLD = 2.0            # 維持時間 [s]
+RATE = 100            # 補間周波数 [Hz]
+MAX_GAP = 0.20        # Odometryの最大許容欠損 [s]
 
 
-def prepare_samples(odom, command_time, settle_limit, duration, max_gap):
-    """指令後0～duration秒の位置データを取り出し、必要な時刻を補間する。"""
-    relative = sorted((t - command_time, x, y) for t, x, y in odom)
-    if not relative or relative[0][0] > 0 or relative[-1][0] < duration:
-        return None, f"指令前または指令後{duration:g}秒までの位置データが不足しています"
+def read_bag(path):
+    """CoGの位置・速度と位置指令を読み込む。"""
+    import rosbag
 
-    start = interpolate_position(relative, 0.0)
-    middle = interpolate_position(relative, settle_limit)
-    end = interpolate_position(relative, duration)
-    if start is None or middle is None or end is None:
-        return None, "必要な時刻の位置を補間できません"
-
-    points = [(0.0, *start)]
-    points += [(t, x, y) for t, x, y in relative if 0 < t < duration]
-    points.append((duration, *end))
-
-    # サンプル間の大きな欠落を、許容範囲内の連続維持と誤認しない。
-    if any(b[0] - a[0] > max_gap + 1e-9 for a, b in zip(points, points[1:])):
-        return None, f"位置データの間隔が{max_gap:g}秒を超えています"
-
-    points.append((settle_limit, *middle))
-    points.sort(key=lambda row: row[0])
-    return points, None
-
-
-def evaluate(odom, command, args):
-    """位置系列を判定する。ROSライブラリには依存しない。"""
-    command_time, target_x, target_y = command
-    result = {
-        "判定": "未判定",
-        "判定理由": [],
-        "目標位置_m": [target_x, target_y],
-        "解析区間_s": [0.0, args.duration],
-        "収束判定区間_s": [args.settle_limit, args.duration],
-    }
-
-    points, reason = prepare_samples(
-        odom, command_time, args.settle_limit, args.duration, args.max_gap
-    )
-    if points is None:
-        result["判定理由"] = [reason]
-        return result
-
-    if not all(math.isfinite(v) for _, x, y in points for v in (x, y)):
-        result["判定理由"] = ["位置データにNaNまたは無限大があります"]
-        return result
-
-    start_x, start_y = points[0][1:]
-    dx, dy = target_x - start_x, target_y - start_y
-    distance = math.hypot(dx, dy)
-    result["指令移動量_m"] = distance
-
-    if (
-        not math.isfinite(distance)
-        or distance == 0
-        or abs(distance - args.distance) > args.distance_tolerance
-    ):
-        result["判定理由"] = [
-            f"指令移動量{distance:.3f}mが想定{args.distance:g}±"
-            f"{args.distance_tolerance:g}mから外れています"
-        ]
-        return result
-
-    # XとYを独立に評価（XY合成誤差は使用しない）。
-    x_errors = [abs(x - target_x) for _, x, y in points]
-    y_errors = [abs(y - target_y) for _, x, y in points]
-
-    # 観測区間の終わりまで、両軸とも許容範囲内に留まる最初の時刻。
-    last_outside = max(
-        (
-            i for i, (ex, ey) in enumerate(zip(x_errors, y_errors))
-            if ex > args.tolerance + 1e-12
-            or ey > args.tolerance + 1e-12
-        ),
-        default=-1,
-    )
-    settle_time = (
-        round(points[last_outside + 1][0], 3)
-        if last_outside + 1 < len(points) else None
-    )
-
-    # オーバーシュートは従来どおり、移動方向への射影で測る。
-    ux, uy = dx / distance, dy / distance
-    overshoot_m = max(
-        0.0,
-        max(
-            (x - target_x) * ux + (y - target_y) * uy
-            for _, x, y in points
-        ),
-    )
-    overshoot_pct = 100 * overshoot_m / args.distance
-
-    # 20～30秒のX・Yそれぞれの最大誤差を計算する。
-    window_indices = [
-        i for i, (t, _, _) in enumerate(points)
-        if t >= args.settle_limit
-    ]
-    max_x = max(x_errors[i] for i in window_indices)
-    max_y = max(y_errors[i] for i in window_indices)
-
-    result.update({
-        "各軸の許容位置誤差_m": args.tolerance,
-        "収束時刻_s": settle_time,
-        "判定区間の最大X誤差_m": max_x,
-        "判定区間の最大Y誤差_m": max_y,
-        "最終X誤差_m": x_errors[-1],
-        "最終Y誤差_m": y_errors[-1],
-        "最大オーバーシュート_pct": overshoot_pct,
-    })
-
-    problems = []
-
-    if max_x > args.tolerance + 1e-12:
-        problems.append(
-            f"X方向の最大誤差{max_x:.3f}mが"
-            f"許容幅{args.tolerance:.3f}mを超えました"
-        )
-
-    if max_y > args.tolerance + 1e-12:
-        problems.append(
-            f"Y方向の最大誤差{max_y:.3f}mが"
-            f"許容幅{args.tolerance:.3f}mを超えました"
-        )
-
-    if overshoot_pct > args.overshoot + 1e-12:
-        problems.append(
-            f"オーバーシュート{overshoot_pct:.2f}%が"
-            f"上限{args.overshoot:g}%を超えました"
-        )
-
-    result["判定"] = "NG" if problems else "OK"
-    result["判定理由"] = problems or [
-        "X・Yそれぞれの誤差とオーバーシュートの条件を満たしました"
-    ]
-    return result
-
-
-def load_rosbag(path, nav_topic, odom_topic, command_index):
-    """ROS1 rosbagからCoG位置と位置指令を取得する。"""
-    try:
-        import rosbag
-    except ImportError as exc:
-        raise RuntimeError(
-            "ROS1環境で実行してください（import rosbagが必要）"
-        ) from exc
-
-    odom = []
-    commands = []
+    odom, commands = [], []
 
     with rosbag.Bag(str(path), "r") as bag:
         for topic, msg, stamp in bag.read_messages(
-            topics=[nav_topic, odom_topic]
+            topics=[NAV_TOPIC, ODOM_TOPIC]
         ):
             t = stamp.to_sec()
 
-            if topic == odom_topic:
+            if topic == ODOM_TOPIC:
                 p = msg.pose.pose.position
-                odom.append((t, float(p.x), float(p.y)))
+                v = msg.twist.twist.linear
+                odom.append((t, p.x, p.y, v.x, v.y))
 
-            elif topic == nav_topic:
-                # XY位置指令かつCoGが対象のものだけを採用する。
-                if msg.pos_xy_nav_mode in (2, 4) and msg.target == 1:
-                    commands.append((
-                        t,
-                        float(msg.target_pos_x),
-                        float(msg.target_pos_y),
-                    ))
+            elif msg.pos_xy_nav_mode in (2, 4) and msg.target == 1:
+                commands.append(
+                    (t, msg.target_pos_x, msg.target_pos_y)
+                )
 
-    if not odom:
-        raise RuntimeError(f"位置データがありません: {odom_topic}")
-    if not commands:
-        raise RuntimeError(f"CoGの位置指令がありません: {nav_topic}")
-    if not 1 <= command_index <= len(commands):
-        raise RuntimeError(
-            f"--command-indexは1～{len(commands)}で指定してください"
-        )
+    if len(odom) < 2 or not commands:
+        raise ValueError("OdometryまたはCoGのXY位置指令が不足しています")
 
-    return odom, commands[command_index - 1], len(commands)
+    odom = np.asarray(odom, dtype=float)
+
+    if not np.isfinite(odom).all():
+        raise ValueError("OdometryにNaN/Infが含まれています")
+
+    if np.any(np.diff(odom[:, 0]) < 0):
+        raise ValueError("Odometryの記録時刻が逆行しています")
+
+    # 同一時刻のサンプルは最初の1件だけ残す
+    odom = odom[np.r_[True, np.diff(odom[:, 0]) > 0]]
+
+    return odom, commands
+
+
+def find_command(odom, commands):
+    """初期位置から+X方向に約1 m移動する最初の指令を選ぶ。"""
+    times = odom[:, 0]
+
+    for t, x_target, y_target in commands:
+        i = np.searchsorted(times, t, side="right") - 1
+
+        if i < 0 or t - times[i] > MAX_GAP:
+            continue
+
+        x0, y0 = odom[i, 1:3]
+
+        if (
+            abs(x_target - x0 - 1.0) <= 0.05
+            and abs(y_target - y0) <= 0.05
+        ):
+            return t, x_target, y_target
+
+    raise ValueError("+X方向約1 mのCoG位置指令が見つかりません")
+
+
+def judge(odom, command):
+    """(判定, 終了時刻Ts, 理由)を返す。Tsは指令からの経過秒数。"""
+    t0, x_target, y_target = command
+    times = odom[:, 0]
+    end = t0 + DURATION
+
+    # 1. 記録時間とデータ欠損を確認
+    if times[0] > t0 or times[-1] < end:
+        return "判定不能", None, "指令後30秒までの記録がありません"
+
+    start = np.searchsorted(times, t0, side="right") - 1
+    stop = np.searchsorted(times, end, side="left") + 1
+
+    if np.any(np.diff(times[start:stop]) > MAX_GAP):
+        return "判定不能", None, "Odometryに0.2秒を超える欠損があります"
+
+    # 2. 指令時刻を0秒として100 Hzで補間
+    t = np.arange(int(DURATION * RATE) + 1) / RATE
+
+    x, y, vx, vy = (
+        np.interp(t0 + t, times, odom[:, i])
+        for i in range(1, 5)
+    )
+
+    # 3. 速度を平滑化し、各時刻から先2秒間のXY速度RMSを計算
+    vx = savgol_filter(vx, 45, 3)
+    vy = savgol_filter(vy, 45, 3)
+
+    speed_sq = vx**2 + vy**2
+
+    # 台形積分
+    area = np.r_[
+        0,
+        np.cumsum((speed_sq[:-1] + speed_sq[1:]) / (2 * RATE))
+    ]
+
+    width = int(HOLD * RATE)
+
+    speed_rms = np.sqrt(
+        np.maximum(0, (area[width:] - area[:-width]) / HOLD)
+    )
+
+    # 4. 位置・速度の条件を判定
+    position_ok = (
+        (np.abs(x - x_target) <= POSITION_TOL)
+        & (np.abs(y - y_target) <= POSITION_TOL)
+    )
+
+    speed_ok = speed_rms <= SPEED_TOL
+
+    # 候補時刻以降、30秒まで再逸脱しないことを確認
+    position_stays_ok = np.logical_and.accumulate(
+        position_ok[::-1]
+    )[::-1]
+
+    speed_stays_ok = np.logical_and.accumulate(
+        speed_ok[::-1]
+    )[::-1]
+
+    candidates = np.flatnonzero(
+        position_stays_ok[:len(speed_ok)] & speed_stays_ok
+    )
+
+    if len(candidates) == 0:
+        return "時間超過", None, "30秒以内に終了条件を確認できませんでした"
+
+    return "時間内終了", float(t[candidates[0]]), "位置・速度条件を満たしました"
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="DRAGON XY PID応答判定（各軸独立）"
-    )
-
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "bag", type=Path, help="解析するrosbagファイル"
+        "bags", nargs="+", type=Path,
+        help="解析するbagファイル（複数指定可）"
     )
-    parser.add_argument(
-        "--duration", type=float, default=30.0,
-        help="解析終了時刻 [s]"
-    )
-    parser.add_argument(
-        "--settle-limit", type=float, default=20.0,
-        help="これ以降、解析終了まで各軸の許容範囲を維持する [s]"
-    )
-    parser.add_argument(
-        "--distance", type=float, default=1.0,
-        help="想定移動距離 [m]"
-    )
-    parser.add_argument(
-        "--distance-tolerance", type=float, default=0.05,
-        help="想定移動距離の許容差 [m]"
-    )
-    parser.add_argument(
-        "--tolerance", type=float, default=0.2,
-        help="X・Y各軸の許容位置誤差 [m]（既定±0.2 m）"
-    )
-    parser.add_argument(
-        "--overshoot", type=float, default=200.0,
-        help="許容オーバーシュート [%%]"
-    )
-    parser.add_argument(
-        "--max-gap", type=float, default=0.2,
-        help="位置データの最大許容間隔 [s]"
-    )
-    parser.add_argument(
-        "--command-index", type=int, default=1,
-        help="解析対象の位置指令の番号（1始まり）"
-    )
-    parser.add_argument("--nav-topic", default=NAV_TOPIC)
-    parser.add_argument("--odom-topic", default=ODOM_TOPIC)
-    parser.add_argument(
-        "--json", action="store_true",
-        help="JSON形式で出力"
-    )
-
     args = parser.parse_args()
 
-    if not args.bag.is_file():
-        parser.error(f"ファイルが見つかりません: {args.bag}")
-    if not 0 <= args.settle_limit < args.duration:
-        parser.error("0 <= settle-limit < durationにしてください")
-    if args.distance <= 0 or args.max_gap <= 0:
-        parser.error("distanceとmax-gapは正の数にしてください")
-    if min(args.distance_tolerance, args.tolerance, args.overshoot) < 0:
-        parser.error("各許容値は0以上にしてください")
+    for path in args.bags:
+        try:
+            odom, commands = read_bag(path)
+            command = find_command(odom, commands)
+            status, ts, reason = judge(odom, command)
 
-    try:
-        odom, command, count = load_rosbag(
-            args.bag, args.nav_topic, args.odom_topic, args.command_index
-        )
-        result = evaluate(odom, command, args)
-    except Exception as exc:
-        print(f"解析できません: {exc}", file=sys.stderr)
-        return 2
+        except Exception as exc:
+            status, ts, reason = "判定不能", None, str(exc)
 
-    result["bag"] = args.bag.name
-    result["対象位置指令"] = f"{args.command_index} / {count}"
+        print(f"\n=== {path.name} ===")
+        print(f"判定: {status}")
 
-    if args.json:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    else:
-        print("\n=== DRAGON XY PID 判定（X・Y独立） ===")
-        print(f"bag: {args.bag.name}")
-        print(f"位置指令: {result['対象位置指令']}")
+        if ts is not None:
+            print(f"動作終了時刻 Ts: {ts:.2f} s")
 
-        if "収束時刻_s" in result:
-            print(f"各軸の許容位置誤差: ±{args.tolerance:.3f} m")
-            print(f"観測上の収束時刻: {result['収束時刻_s']} 秒")
-            print(
-                f"{args.settle_limit:g}～{args.duration:g}秒の最大X誤差: "
-                f"{result['判定区間の最大X誤差_m']:.3f} m"
-            )
-            print(
-                f"{args.settle_limit:g}～{args.duration:g}秒の最大Y誤差: "
-                f"{result['判定区間の最大Y誤差_m']:.3f} m"
-            )
-            print(
-                f"最大オーバーシュート: "
-                f"{result['最大オーバーシュート_pct']:.2f}%"
-            )
-
-        print(f"判定: {result['判定']}")
-        for reason in result["判定理由"]:
-            print(f"  - {reason}")
-
-    return {"OK": 0, "NG": 1, "未判定": 2}[result["判定"]]
+        print(f"理由: {reason}")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

@@ -1,265 +1,300 @@
 #!/usr/bin/env python3
-"""複数のROS1 rosbagの移動指令時刻を揃え、DRAGONの重心位置を軸ごとに比較する。"""
+"""複数のDRAGON rosbagを比較し、動作終了条件と終了時刻を可視化する。"""
 
 import argparse
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-import rosbag
+from scipy.signal import savgol_filter
 
-
-NAV_TOPIC = "/dragon/uav/nav"
-ODOM_TOPIC = "/dragon/uav/cog/odom"
-AXES = ("x", "y", "z")
-
-# グラフ上に表示する許容位置誤差（各軸の目標値±この値）
-TOLERANCE_M = 0.2
-SETTLE_LIMIT_S = 20.0
-DURATION_S = 30.0
+from judge_convergence import (
+    DURATION, HOLD, POSITION_TOL, RATE, SPEED_TOL,
+    find_command, judge, read_bag,
+)
 
 
 def find_data_dir():
-    """スクリプトの親階層にあるワークスペースのdata/を探す。"""
+    """ワークスペース内のdata/フォルダを見つける。"""
     for parent in Path(__file__).resolve().parents:
-        data_dir = parent / "data"
-        if data_dir.is_dir():
-            return data_dir
-    raise FileNotFoundError("ワークスペースのdata/ディレクトリが見つかりません")
+        folder = parent / "data"
+        if folder.is_dir():
+            return folder
+    raise FileNotFoundError("ワークスペースのdata/が見つかりません")
 
 
-def resolve_bag_path(path, data_dir):
-    """相対パスはdata/以下、絶対パスはそのまま使用する。"""
-    path = path.expanduser()
-    bag_path = path if path.is_absolute() else data_dir / path
-    if not bag_path.is_file():
-        raise FileNotFoundError(f"bagファイルが見つかりません: {bag_path}")
-    return bag_path
+def load_result(path):
+    """動作終了判定とプロット用の時系列データを取得する。"""
+    odom, commands = read_bag(path)
+    command = find_command(odom, commands)
+    status, ts, reason = judge(odom, command)
 
+    t0, target_x, target_y = command
 
-def resolve_output_path(path, data_dir):
-    """相対パスはdata/以下として扱い、保存先フォルダを作る。"""
-    path = path.expanduser()
-    output_path = path if path.is_absolute() else data_dir / path
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    return output_path
+    time = odom[:, 0] - t0
+    error_x = odom[:, 1] - target_x
+    error_y = odom[:, 2] - target_y
 
+    rms_time, rms = None, None
 
-def load_bag(path, command_index):
-    """指定した移動指令をt=0として、重心位置と目標位置を読み込む。"""
-    commands = []
-    samples = []
+    if status != "判定不能":
+        # 100 Hzでリサンプリング
+        grid = np.arange(int(DURATION * RATE) + 1) / RATE
 
-    with rosbag.Bag(str(path), "r") as bag:
-        bag_end_time = bag.get_end_time()
-        for topic, msg, bag_time in bag.read_messages(topics=[NAV_TOPIC, ODOM_TOPIC]):
-            t = bag_time.to_sec()
-            if topic == NAV_TOPIC:
-                commands.append((t, msg))
-            elif topic == ODOM_TOPIC:
-                p = msg.pose.pose.position
-                samples.append((t, float(p.x), float(p.y), float(p.z)))
+        vx = np.interp(grid, time, odom[:, 3])
+        vy = np.interp(grid, time, odom[:, 4])
 
-    if not commands:
-        raise ValueError(f"{path}: {NAV_TOPIC} が見つかりません")
-    if not samples:
-        raise ValueError(f"{path}: {ODOM_TOPIC} が見つかりません")
-    if command_index >= len(commands):
-        raise ValueError(
-            f"{path}: 指令は{len(commands)}件です。"
-            f"--command-index は0～{len(commands) - 1}で指定してください"
+        # 速度の平滑化
+        vx = savgol_filter(vx, 45, 3)
+        vy = savgol_filter(vy, 45, 3)
+
+        # XY速度の二乗
+        speed_sq = vx**2 + vy**2
+
+        # 台形積分による累積積分
+        area = np.r_[
+            0,
+            np.cumsum(
+                (speed_sq[:-1] + speed_sq[1:]) / (2 * RATE)
+            ),
+        ]
+
+        # 各時刻から先の2秒間の速度RMS
+        width = int(HOLD * RATE)
+
+        rms = np.sqrt(
+            np.maximum(
+                0,
+                (area[width:] - area[:-width]) / HOLD,
+            )
         )
 
-    command_time, command = commands[command_index]
-    data = np.asarray(samples, dtype=float)
-    data = data[np.argsort(data[:, 0])]
-    times = data[:, 0] - command_time
-    positions = data[:, 1:4]
+        rms_time = grid[:len(rms)]
 
-    # 指令直前の最後の位置を変位の基準にする。
-    before = np.flatnonzero(times <= 0.0)
-    base_index = before[-1] if len(before) else np.argmin(np.abs(times))
-    baseline = positions[base_index].copy()
-
-    target = np.array(
-        [command.target_pos_x, command.target_pos_y, command.target_pos_z],
-        dtype=float,
-    )
-    has_position_target = (
-        command.pos_xy_nav_mode in (2, 4),
-        command.pos_xy_nav_mode in (2, 4),
-        command.pos_z_nav_mode in (2, 4),
+    print(
+        f"{path.name}: {status}"
+        + (f"  Ts={ts:.2f} s" if ts is not None else "")
     )
 
-    return {
-        "time": times,
-        "position": positions,
-        "baseline": baseline,
-        "target": target,
-        "has_position_target": has_position_target,
-        "command_time": command_time,
-        "num_commands": len(commands),
-        "end_time": bag_end_time - command_time,
-    }
+    if status == "判定不能":
+        print(f"  理由: {reason}")
+
+    return time, error_x, error_y, rms_time, rms, status, ts
+
+
+def plot_results(paths, labels, before, output):
+    """X位置誤差・Y位置誤差・XY速度RMSを比較表示する。"""
+    fig, axes = plt.subplots(
+        3, 1,
+        figsize=(11, 8),
+        sharex=True,
+        layout="constrained",
+    )
+
+    # X・Y位置誤差の許容範囲
+    for ax in axes[:2]:
+        ax.axhspan(
+            -POSITION_TOL,
+            POSITION_TOL,
+            color="seagreen",
+            alpha=0.12,
+        )
+        ax.axhline(
+            0,
+            color="gray",
+            linewidth=0.8,
+        )
+
+    # XY速度RMSの許容範囲
+    axes[2].axhspan(
+        0,
+        SPEED_TOL,
+        color="seagreen",
+        alpha=0.12,
+    )
+    axes[2].axhline(
+        SPEED_TOL,
+        color="seagreen",
+        linestyle="--",
+        linewidth=1.2,
+    )
+
+    for path, label in zip(paths, labels):
+        t, ex, ey, tr, rms, status, ts = load_result(path)
+
+        mask = (t >= -before) & (t <= DURATION)
+
+        # 判定結果を凡例に表示
+        # ts=Noneの場合に数値フォーマットを使わない
+        if status == "時間内終了" and ts is not None:
+            status_en = f"Finished: Ts={ts:.2f} s"
+        elif status == "時間超過":
+            status_en = "Timeout"
+        else:
+            status_en = "Unavailable"
+
+        # X位置誤差
+        line, = axes[0].plot(
+            t[mask],
+            ex[mask],
+            linewidth=1.6,
+            label=f"{label} / {status_en}",
+        )
+
+        color = line.get_color()
+
+        # Y位置誤差
+        axes[1].plot(
+            t[mask],
+            ey[mask],
+            color=color,
+            linewidth=1.6,
+        )
+
+        # XY速度RMS
+        if rms is not None:
+            axes[2].plot(
+                tr,
+                rms,
+                color=color,
+                linewidth=1.6,
+            )
+
+        # 動作終了時刻と2秒間の維持確認区間
+        if ts is not None:
+            for ax in axes:
+                ax.axvline(
+                    ts,
+                    color=color,
+                    linestyle=":",
+                    linewidth=1.4,
+                )
+                ax.axvspan(
+                    ts,
+                    ts + HOLD,
+                    color=color,
+                    alpha=0.045,
+                )
+
+    # 指令時刻と30秒の制限時間
+    for ax in axes:
+        ax.axvline(
+            0,
+            color="black",
+            linestyle=":",
+            linewidth=1,
+        )
+        ax.axvline(
+            DURATION,
+            color="firebrick",
+            linestyle="--",
+            linewidth=1.2,
+        )
+        ax.grid(alpha=0.25)
+
+    # 軸ラベル
+    axes[0].set_ylabel("X position error [m]")
+    axes[1].set_ylabel("Y position error [m]")
+    axes[2].set_ylabel(
+        "XY speed RMS [m/s]\n(window: t to t+2 s)"
+    )
+    axes[2].set_xlabel("Time after movement command [s]")
+    axes[2].set_xlim(-before, DURATION + 0.2)
+
+    # 凡例
+    axes[0].legend(
+        loc="upper left",
+        bbox_to_anchor=(1.01, 1),
+        fontsize=9,
+    )
+
+    fig.suptitle(
+        "DRAGON CoG XY: Motion Completion (30 s deadline)"
+    )
+
+    # グラフを保存
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(
+        output,
+        dpi=180,
+        bbox_inches="tight",
+    )
+
+    print(f"Saved: {output}")
+
+    return fig
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+
     parser.add_argument(
-        "bags", nargs="+", type=Path,
-        help="比較するbagファイル（相対パスはdata/基準）",
-    )
-    parser.add_argument("--labels", nargs="+", help="凡例（bagと同じ数だけ指定）")
-    parser.add_argument(
-        "--axis", choices=("xy", "x", "y", "z", "xyz"), default="xy",
-        help="表示する軸（デフォルト: xy＝X・Yの2段表示）",
+        "bags",
+        nargs="+",
+        type=Path,
+        help="比較するrosbagファイル",
     )
     parser.add_argument(
-        "--before", type=float, default=1.0,
-        help="指令前の表示時間[s]（デフォルト: 1）",
+        "--labels",
+        nargs="+",
+        help="各bagの凡例名",
     )
     parser.add_argument(
-        "--after", type=float, default=None,
-        help="指令後の表示時間[s]（省略時: 最長のbagに揃える）",
+        "--before",
+        type=float,
+        default=1.0,
+        help="指令前の表示時間 [s]",
     )
     parser.add_argument(
-        "--command-index", type=int, default=0,
-        help="基準にする指令の番号（0から開始）",
+        "--output",
+        type=Path,
+        default=Path("plot/compare_convergence.png"),
+        help="グラフの保存先",
     )
     parser.add_argument(
-        "--absolute", action="store_true",
-        help="初期位置を引かずに絶対位置を表示",
+        "--no-show",
+        action="store_true",
+        help="画面表示せずに保存する",
     )
-    parser.add_argument(
-        "--no-target", action="store_true",
-        help="目標位置線と許容帯を非表示",
-    )
-    parser.add_argument(
-        "--tolerance", type=float, default=TOLERANCE_M,
-        help=f"各軸の目標値に対する許容幅[m]（デフォルト: {TOLERANCE_M}）",
-    )
-    parser.add_argument(
-        "--output", type=Path, default=Path("plot/compare_position.png"),
-        help="画像の保存先（相対パスはdata/基準）",
-    )
-    parser.add_argument(
-        "--no-show", action="store_true",
-        help="グラフのウィンドウを開かない",
-    )
+
     args = parser.parse_args()
 
     if args.labels is not None and len(args.labels) != len(args.bags):
-        parser.error("--labelsの数はbagファイル数と一致させてください")
+        parser.error("--labelsはbagの数と同じ数を指定してください")
+
     if args.before < 0:
         parser.error("--beforeは0以上にしてください")
-    if args.after is not None and args.after <= 0:
-        parser.error("--afterは0より大きくしてください")
-    if args.command_index < 0:
-        parser.error("--command-indexは0以上にしてください")
-    if args.tolerance < 0:
-        parser.error("--toleranceは0以上にしてください")
 
-    try:
-        data_dir = find_data_dir()
-        bag_paths = [resolve_bag_path(path, data_dir) for path in args.bags]
-        results = [load_bag(path, args.command_index) for path in bag_paths]
-        output_path = resolve_output_path(args.output, data_dir)
-    except (FileNotFoundError, ValueError) as exc:
-        parser.error(str(exc))
+    # data/ディレクトリを取得
+    data_dir = find_data_dir()
 
-    after = max(r["end_time"] for r in results) if args.after is None else args.after
-    if after <= 0:
-        parser.error("移動指令より後にbagの記録がありません")
+    # bagのパスを解決
+    paths = [
+        p.expanduser() if p.is_absolute()
+        else data_dir / p
+        for p in args.bags
+    ]
 
-    labels = args.labels or [path.stem for path in args.bags]
-    components = {"xy": ("x", "y"), "xyz": AXES}.get(args.axis, (args.axis,))
+    for path in paths:
+        if not path.is_file():
+            parser.error(f"bagが見つかりません: {path}")
 
-    fig, axes = plt.subplots(
-        len(components), 1,
-        figsize=(10, 3.1 * len(components) + 1.0),
-        sharex=True, squeeze=False,
+    # 出力パスを解決
+    output = (
+        args.output.expanduser()
+        if args.output.is_absolute()
+        else data_dir / args.output
     )
-    axes = axes[:, 0]
 
-    # 灰色の帯は、20～30秒の収束維持判定区間を示す。
-    if after > SETTLE_LIMIT_S:
-        for ax in axes:
-            ax.axvspan(
-                SETTLE_LIMIT_S, min(DURATION_S, after),
-                color="gray", alpha=0.12,
-                label=f"Evaluation: {SETTLE_LIMIT_S:g}-{DURATION_S:g} s",
-            )
+    labels = args.labels or [p.stem for p in paths]
 
-    for label, result in zip(labels, results):
-        t = result["time"]
-        position = result["position"].copy()
-        target = result["target"].copy()
-        baseline = result["baseline"]
-        mask = (t >= -args.before) & (t <= after)
-
-        if not args.absolute:
-            position -= baseline
-            target -= baseline
-
-        print(
-            f"{label}: 指令時刻={result['command_time']:.3f}s, "
-            f"指令後の記録時間={result['end_time']:.3f}s, "
-            f"指令件数={result['num_commands']}, "
-            f"初期位置={baseline.round(4)}m"
-        )
-        if not np.any(mask):
-            print(f"WARNING: {label} の表示範囲に位置データがありません")
-            continue
-
-        for ax, component in zip(axes, components):
-            index = AXES.index(component)
-
-            (line,) = ax.plot(
-                t[mask], position[mask, index],
-                linewidth=1.8, label=label,
-            )
-
-            if args.no_target or not result["has_position_target"][index]:
-                continue
-
-            target_value = target[index]
-            color = line.get_color()
-
-            ax.axhline(
-                target_value, color=color, linestyle="--",
-                linewidth=1.2, alpha=0.7,
-                label=f"{label} target",
-            )
-
-            if component in ("x", "y"):
-                ax.axhspan(
-                    target_value - args.tolerance,
-                    target_value + args.tolerance,
-                    color=color, alpha=0.08,
-                    label=f"{label} ±{args.tolerance:g} m",
-                )
-
-    for ax, component in zip(axes, components):
-        ax.axvline(
-            0, color="black", linestyle=":", linewidth=1.2,
-            label="Move command (t=0)",
-        )
-
-        ylabel = "Position" if args.absolute else "Displacement"
-        ax.set_ylabel(f"{ylabel} {component.upper()} [m]")
-        ax.grid(True, alpha=0.3)
-        ax.legend(loc="best", fontsize=9)
-
-    axes[-1].set_xlabel("Time from movement command [s]")
-    axes[-1].set_xlim(-args.before, after)
-
-    fig.suptitle("DRAGON CoG Step Response Comparison")
-    fig.tight_layout()
-
-    fig.savefig(output_path, dpi=200, bbox_inches="tight")
-
-    print(f"表示区間: {-args.before:.2f} ～ {after:.2f} s")
-    print(f"Saved: {output_path}")
+    # プロット
+    fig = plot_results(
+        paths,
+        labels,
+        args.before,
+        output,
+    )
 
     if not args.no_show:
         plt.show()
