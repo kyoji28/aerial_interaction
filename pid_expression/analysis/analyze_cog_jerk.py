@@ -1,379 +1,398 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""DRAGON CoG XY jerkiness / activity from ROS1 rosbag.
+"""DRAGON CoG XY: compute RMS jerk during a completed +X 1 m step.
 
-Based on Notion '20261114メモ' (2026-11-16 addendum), and
-'20261116メモ': default 100 Hz, Savitzky-Golay (45 samples, degree 3).
+Place this file next to judge_convergence.py in pid_expression/analysis/.
+The command selection and motion-end decision use judge_convergence.py.
 
-Usage (run in a ROS1 environment where 'rosbag' is available):
-  python3 analyze_cog_jerk.py data/kp4_ki0_03_kd3_2.bag
-  python3 analyze_cog_jerk.py data/*.bag --command-index 0
-  python3 analyze_cog_jerk.py data/*.bag --command-time 8.5
+Examples (ROS1 environment):
+  python3 analyze_cog_jerk.py data/run01.bag
+  python3 analyze_cog_jerk.py data/*.bag
+  python3 analyze_cog_jerk.py data/run01.bag --kp 0.5 --ki 0.03 --kd 0.2
+  python3 analyze_cog_jerk.py data/run01.bag --command-index 1
+  python3 analyze_cog_jerk.py data/run01.bag --window 61
 
---command-index is ZERO-BASED, as in compare_position_xy.py.
---command-time is seconds from first rosbag message, and overrides detection.
-The script never guesses t=0 from the beginning of a bag.
+PID gains are NOT parsed from filenames. Supply --kp/--ki/--kd manually,
+or leave these CSV columns blank and enter them later in the spreadsheet.
+
+Output in --output (destination directory):
+  metrics.csv                 One row per bag, aligned with the Google Sheet.
+  timeseries_XX_*.csv         Time series for inspection (when calculable).
+  jerk_XX_*.png               Position error, velocity, and jerk plots.
+  jerk_comparison.png         Overlay plot when 2+ trials are calculable.
+
+All positions, velocities, and jerk are treated as WORLD-frame XY values.
+No rotation by the CoG quaternion is applied. This follows DRAGON's
+state_estimation.cpp implementation; verify consistency with your rosbag.
 """
 
 import argparse
 import csv
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from scipy.signal import savgol_filter
-from scipy.spatial.transform import Rotation
 
-NAV_TOPIC = "/dragon/uav/nav"
-ODOM_TOPIC = "/dragon/uav/cog/odom"
+from judge_convergence import (
+    ARRIVAL_LIMIT,
+    DURATION,
+    HOLD,
+    MAX_GAP,
+    NAV_TOPIC,
+    ODOM_TOPIC,
+    POSITION_TOL,
+    find_command,
+    judge,
+    read_bag,
+)
 
-
-@dataclass
-class BagData:
-    name: str
-    bag_start: float
-    odom_t: np.ndarray
-    position: np.ndarray       # (N,3), represented in odom.header.frame_id
-    velocity: np.ndarray       # (N,3), represented in odom.child_frame_id
-    quaternion: np.ndarray     # (N,4): xyzw, maps child to header frame
-    nav_t: np.ndarray
-    nav_xy: np.ndarray         # (M,2) target XY; NaN for unsupported messages
-    pose_frame: str
-    twist_frame: str
-
-
-def nav_target_xy(msg):
-    """Read the position target from JSK aerial_robot_msgs/FlightNav, or a Pose."""
-    if hasattr(msg, "target_pos_x") and hasattr(msg, "target_pos_y"):
-        return float(msg.target_pos_x), float(msg.target_pos_y)
-    if hasattr(msg, "target_position") and hasattr(msg.target_position, "x"):
-        return float(msg.target_position.x), float(msg.target_position.y)
-    if hasattr(msg, "pose"):
-        pose = msg.pose.pose if hasattr(msg.pose, "pose") else msg.pose
-        if hasattr(pose, "position"):
-            return float(pose.position.x), float(pose.position.y)
-    if hasattr(msg, "point"):
-        return float(msg.point.x), float(msg.point.y)
-    if hasattr(msg, "position"):
-        return float(msg.position.x), float(msg.position.y)
-    return None
+OUTPUT_COLUMNS = [
+    "試行番号", "Kp", "Ki", "Kd", "終了判定",
+    "Ts [s]", "RMS Jerk [m/s³]", "rosbag名",
+]
 
 
-def load_bag(path):
-    # Import here so that mathematical routines can be unit-tested without ROS.
+def read_world_velocity(path):
+    """Read CoG velocity with the same ROS bag timestamps as read_bag()."""
     try:
         import rosbag
     except ImportError as exc:
-        raise RuntimeError(
-            "ROS1 'rosbag' が見つかりません。ROS環境をsourceして実行してください。"
-        ) from exc
+        raise RuntimeError("ROS1のrosbagが見つかりません。ROS環境をsourceしてください") from exc
 
-    times, xyz, vel, quat, nav_t, nav_xy = [], [], [], [], [], []
+    samples = []
+    first_time = None
     pose_frames, twist_frames = set(), set()
-    first_timestamp = None
     with rosbag.Bag(str(path), "r") as bag:
-        for topic, msg, bag_stamp in bag.read_messages(topics=[NAV_TOPIC, ODOM_TOPIC]):
-            # A single time source is used for BOTH topics to avoid clock offsets.
-            stamp = float(bag_stamp.to_sec())
-            if first_timestamp is None:
-                first_timestamp = stamp
-            if topic == NAV_TOPIC:
-                target = nav_target_xy(msg)
-                nav_t.append(stamp)
-                nav_xy.append(target if target is not None else (np.nan, np.nan))
-            elif topic == ODOM_TOPIC:
-                p = msg.pose.pose.position
-                v = msg.twist.twist.linear
-                q = msg.pose.pose.orientation
-                times.append(stamp)
-                xyz.append((p.x, p.y, p.z))
-                vel.append((v.x, v.y, v.z))
-                quat.append((q.x, q.y, q.z, q.w))
-                pose_frames.add(str(msg.header.frame_id))
-                twist_frames.add(str(msg.child_frame_id))
-
-    if not times:
-        raise ValueError(f"{path}: {ODOM_TOPIC} がありません")
-    if len(pose_frames) != 1 or len(twist_frames) != 1:
-        raise ValueError(f"{path}: frame_idが試行中に変化しています: {pose_frames}, {twist_frames}")
-    if not np.all(np.isfinite(xyz)) or not np.all(np.isfinite(vel)):
-        raise ValueError(f"{path}: CoG位置または速度にNaN/Infがあります")
-
-    t = np.array(times, dtype=float)
-    if np.any(np.diff(t) < 0):
-        raise ValueError(f"{path}: 時刻が逆行しています。シミュレーションのリセットに注意")
-    # ROS bags may contain duplicate timestamps; retain their last sample.
-    ids = np.r_[np.where(np.diff(t) != 0)[0], len(t) - 1]
-    t, p, v, q = t[ids], np.asarray(xyz)[ids], np.asarray(vel)[ids], np.asarray(quat)[ids]
-    if len(t) < 10:
-        raise ValueError(f"{path}: Odometryデータが少なすぎます")
-    if not np.all(np.isfinite(q)) or np.any(np.linalg.norm(q, axis=1) < 1e-8):
-        raise ValueError(f"{path}: 無効な姿勢クォータニオンがあります")
-
-    return BagData(path.stem, float(first_timestamp), t, p, v, q,
-                   np.array(nav_t, dtype=float), np.array(nav_xy, dtype=float).reshape((-1, 2)),
-                   next(iter(pose_frames)), next(iter(twist_frames)))
-
-
-def find_step_commands(data, step_m=1.0, step_tolerance=0.05):
-    """Find +X step targets, either from previous nav target or recent CoG pose.
-
-    If only one command exists and no recent pre-command odometry can validate
-    the 1-m step, the candidate is rejected; use --command-time instead.
-    """
-    out = []
-    previous = None
-    for t, target in zip(data.nav_t, data.nav_xy):
-        if not np.all(np.isfinite(target)):
-            continue
-        if previous is not None and np.linalg.norm(target - previous) < 1e-6:
-            continue  # repeatedly published unchanged targets are not commands
-        if previous is not None:
-            dx, dy = target - previous
-        else:
-            at = np.searchsorted(data.odom_t, t, side="left") - 1
-            if at < 0 or not (0.0 <= t - data.odom_t[at] <= 1.0):
-                previous = target.copy()
+        for topic, msg, stamp in bag.read_messages(topics=[NAV_TOPIC, ODOM_TOPIC]):
+            t = float(stamp.to_sec())
+            if first_time is None:
+                first_time = t
+            if topic != ODOM_TOPIC:
                 continue
-            dx, dy = target - data.position[at, :2]
-        if abs(dx - step_m) <= step_tolerance and abs(dy) <= step_tolerance:
-            out.append(float(t))
-        previous = target.copy()
-    return out
+            v = msg.twist.twist.linear
+            samples.append((t, float(v.x), float(v.y)))
+            pose_frames.add(str(msg.header.frame_id))
+            twist_frames.add(str(msg.child_frame_id))
+
+    if len(samples) < 2:
+        raise ValueError("CoGのOdometry速度データが不足しています")
+    if len(pose_frames) != 1 or len(twist_frames) != 1:
+        raise ValueError("Odometryのframe_id / child_frame_idが途中で変化しています")
+
+    data = np.asarray(samples, dtype=float)
+    if not np.isfinite(data).all() or np.any(np.diff(data[:, 0]) < 0):
+        raise ValueError("Odometry速度にNaN/Infまたは時刻の逆行があります")
+
+    # Match judge_convergence.read_bag(): keep the FIRST duplicate timestamp.
+    data = data[np.r_[True, np.diff(data[:, 0]) > 0]]
+    return data, first_time, next(iter(pose_frames)), next(iter(twist_frames))
 
 
-def rotate_velocity_to_pose_frame(vel, quaternion, mode):
-    if mode == "world":
-        return vel.copy()
-    # nav_msgs/Odometry: twist is conventionally in 'child_frame_id'.
-    # Pose quaternion represents the child-frame orientation in header.frame_id.
-    norms = np.linalg.norm(quaternion, axis=1)
-    return Rotation.from_quat(quaternion / norms[:, None]).apply(vel)
-
-
-def rms_xy(t, x, y, lo, hi):
-    select = (t >= lo - 1e-9) & (t <= hi + 1e-9)
-    if np.count_nonzero(select) < 2:
-        raise ValueError(f"{lo}～{hi}sにサンプルがありません")
-    squared = x[select]**2 + y[select]**2
-    integral = np.trapezoid(squared, t[select]) if hasattr(np, "trapezoid") \
-        else np.trapz(squared, t[select])
-    return float(np.sqrt(integral / (hi - lo)))
-
-
-def analyze(data, args):
-    if args.command_time is not None:
-        t0 = data.bag_start + args.command_time
-        command_method = f"manual: {args.command_time:g}s after bag start"
-    else:
-        commands = find_step_commands(data, args.step_m, args.step_tolerance)
-        if args.command_index >= len(commands):
+def select_command(odom, commands, index, command_time, bag_start):
+    """Select a FlightNav command, reusing judge_convergence.find_command()."""
+    if command_time is not None:
+        # A manually selected time still needs the matching target from FlightNav.
+        t0 = bag_start + command_time
+        nearest = min(commands, key=lambda c: abs(c[0] - t0))
+        if abs(nearest[0] - t0) > MAX_GAP:
             raise ValueError(
-                f"+X {args.step_m:g}mの指令が{len(commands)}件しか検出できません"
-                f"（要求index={args.command_index}, 0始まり）。"
-                "navに目標値が存在するか確認するか、--command-time を指定してください。"
+                "--command-time付近に位置指令がありません。"
+                "目標座標を推測しないため解析を中止します"
             )
-        t0 = commands[args.command_index]
-        command_method = f"nav auto-detected, index={args.command_index} (0-based)"
+        return (t0, nearest[1], nearest[2])
 
-    t_end = t0 + args.duration
-    tt = data.odom_t
-    dt_native = np.diff(tt)
-    # Extend the filter input by 0.5s if odometry before/after the requested
-    # interval is available; this reduces edge bias at 0 and 30 seconds.
-    dt = 1.0 / args.rate
-    n = int(round(args.duration / dt))
-    if abs(n * dt - args.duration) > 1e-8:
-        raise ValueError("--duration * --rate は整数になるよう指定してください")
-    n_pre = min(int(args.padding / dt), max(0, int((t0 - tt[0]) / dt)))
-    n_post = min(int(args.padding / dt), max(0, int((tt[-1] - t_end) / dt)))
-    relative = np.arange(-n_pre, n + n_post + 1, dtype=float) * dt
-    t_query = t0 + relative
-
-    edge0 = max(0, tt[0] - t0)
-    edge1 = max(0, t_end - tt[-1])
-    if max(edge0, edge1) > args.edge_tolerance:
-        raise ValueError(
-            f"評価区間の端で記録が不足しています：開始差={edge0:.3f}s,"
-            f"終了差={edge1:.3f}s（許容={args.edge_tolerance}s）"
-        )
-    # Check gaps only in the interval we will interpolate (plus filtering pad).
-    near = (tt >= t_query[0] - args.max_gap) & (tt <= t_query[-1] + args.max_gap)
-    if np.count_nonzero(near) < 3:
-        raise ValueError("評価区間のOdometryデータが不足しています")
-    gaps = np.diff(tt[near])
-    if len(gaps) and float(np.max(gaps)) > args.max_gap + 1e-9:
-        raise ValueError(
-            f"Odometryに最大{np.max(gaps):.3f}sの欠損があります"
-            f"（上限{args.max_gap}s）。ジャークの推定を中止します。"
-        )
-
-    velocity_mode = args.velocity_frame
-    if velocity_mode == "auto":
-        # If pose and twist share a frame, do not rotate. Otherwise use the
-        # Odometry standard: twist in child_frame_id, pose in header.frame_id.
-        velocity_mode = "world" if data.pose_frame == data.twist_frame else "body"
-    velocity_world = rotate_velocity_to_pose_frame(data.velocity, data.quaternion, velocity_mode)
-    vx = np.interp(t_query, tt, velocity_world[:, 0])
-    vy = np.interp(t_query, tt, velocity_world[:, 1])
-    x = np.interp(t_query, tt, data.position[:, 0])
-    y = np.interp(t_query, tt, data.position[:, 1])
-
-    window = args.window
-    if window % 2 != 1 or window <= args.polyorder or len(t_query) < window:
-        raise ValueError("SG窓長は次数より大きい奇数であり、サンプル数以下にしてください")
-    smooth_vx = savgol_filter(vx, window, args.polyorder, deriv=0, delta=dt, mode="interp")
-    smooth_vy = savgol_filter(vy, window, args.polyorder, deriv=0, delta=dt, mode="interp")
-    ax = savgol_filter(vx, window, args.polyorder, deriv=1, delta=dt, mode="interp")
-    ay = savgol_filter(vy, window, args.polyorder, deriv=1, delta=dt, mode="interp")
-    jx = savgol_filter(vx, window, args.polyorder, deriv=2, delta=dt, mode="interp")
-    jy = savgol_filter(vy, window, args.polyorder, deriv=2, delta=dt, mode="interp")
-
-    sel = (relative >= -1e-9) & (relative <= args.duration + 1e-9)
-    series = dict(t=relative[sel], x=x[sel], y=y[sel],
-                  vx=vx[sel], vy=vy[sel],
-                  vx_smooth=smooth_vx[sel], vy_smooth=smooth_vy[sel],
-                  ax=ax[sel], ay=ay[sel], jx=jx[sel], jy=jy[sel])
-    series["jerk_xy"] = np.hypot(series["jx"], series["jy"])
-    metrics = {
-        "bag": data.name,
-        "command_time_from_bag_s": t0 - data.bag_start,
-        "command_selection": command_method,
-        "frame_id": data.pose_frame,
-        "child_frame_id": data.twist_frame,
-        "velocity_frame_mode": velocity_mode,
-        "native_median_dt_s": float(np.median(dt_native)),
-        "native_max_gap_in_window_s": float(np.max(gaps)) if len(gaps) else 0,
-        "rate_hz": args.rate,
-        "sg_window_samples": window,
-        "sg_window_nominal_s": window / args.rate,
-        "sg_polyorder": args.polyorder,
-    }
-    for label, lo, hi in [("0_30", 0, args.duration),
-                          ("0_10", 0, min(10, args.duration)),
-                          ("20_30", 20, args.duration)]:
-        if hi <= lo:
+    # Drop repeated publications of the same target. The judge module's
+    # find_command() validates each candidate against recent CoG position.
+    distinct = []
+    previous_target = None
+    for command in commands:
+        target = np.asarray(command[1:3], dtype=float)
+        if previous_target is not None and np.linalg.norm(target - previous_target) < 1e-6:
             continue
-        metrics[f"jerk_rms_{label}_m_s3"] = rms_xy(series["t"], series["jx"], series["jy"], lo, hi)
-        # Activity is calculated using raw interpolated (not smoothed) velocities.
-        metrics[f"activity_rms_{label}_m_s"] = rms_xy(series["t"], series["vx"], series["vy"], lo, hi)
-    return series, metrics
+        distinct.append(command)
+        previous_target = target
+
+    matched = []
+    for command in distinct:
+        try:
+            matched.append(find_command(odom, [command]))
+        except ValueError:
+            continue
+
+    if index >= len(matched):
+        raise ValueError(
+            f"+X約1mの指令は{len(matched)}件です（指定index={index}、0始まり）"
+        )
+    return matched[index]
 
 
-def write_csv(path, cols):
-    keys = list(cols.keys())
-    size = len(cols[keys[0]])
+def prepare_series(odom, velocity, command, rate, window, polyorder, padding):
+    """Resample to equal time steps and derive acceleration/jerk from velocity."""
+    t0, target_x, target_y = command
+    if len(odom) != len(velocity) or not np.array_equal(odom[:, 0], velocity[:, 0]):
+        raise ValueError("位置と速度のタイムスタンプが一致しません")
+    if window % 2 != 1 or window <= polyorder or polyorder < 2:
+        raise ValueError("SG窓長は次数より大きい奇数、次数は2以上にしてください")
+
+    dt = 1.0 / rate
+    total_count = int(round(DURATION * rate))
+    if not np.isclose(total_count * dt, DURATION, atol=1e-8):
+        raise ValueError("30秒×リサンプリング周波数が整数になる必要があります")
+
+    time_abs = odom[:, 0]
+    n_pre = min(int(padding * rate), max(0, int((t0 - time_abs[0]) * rate)))
+    n_post = min(int(padding * rate), max(0, int((time_abs[-1] - t0 - DURATION) * rate)))
+    relative = np.arange(-n_pre, total_count + n_post + 1) * dt
+    query = t0 + relative
+
+    if query[0] < time_abs[0] - 1e-7 or query[-1] > time_abs[-1] + 1e-7:
+        raise ValueError("ジャーク計算区間の端でOdometryが不足しています")
+
+    # No interpolation across long gaps. This may be stricter than judge().
+    relevant = (time_abs >= query[0] - MAX_GAP) & (time_abs <= query[-1] + MAX_GAP)
+    if np.count_nonzero(relevant) < 3 or np.max(np.diff(time_abs[relevant])) > MAX_GAP + 1e-9:
+        raise ValueError("Odometryに0.2秒を超える欠損があります")
+    if len(query) < window:
+        raise ValueError("ジャーク計算用のサンプル数がSG窓長より少ないです")
+
+    x = np.interp(query, time_abs, odom[:, 1])
+    y = np.interp(query, time_abs, odom[:, 2])
+    vx = np.interp(query, time_abs, velocity[:, 1])  # Already WORLD frame
+    vy = np.interp(query, time_abs, velocity[:, 2])
+
+    smooth_vx = savgol_filter(vx, window, polyorder, deriv=0, delta=dt)
+    smooth_vy = savgol_filter(vy, window, polyorder, deriv=0, delta=dt)
+    jx = savgol_filter(vx, window, polyorder, deriv=2, delta=dt)
+    jy = savgol_filter(vy, window, polyorder, deriv=2, delta=dt)
+
+    # Diagnostic only: the derivative of WORLD position should resemble WORLD
+    # velocity. Never silently rotate the measured velocity to force a match.
+    pos_vx = savgol_filter(x, window, polyorder, deriv=1, delta=dt)
+    pos_vy = savgol_filter(y, window, polyorder, deriv=1, delta=dt)
+    mask = (relative >= -1e-9) & (relative <= DURATION + 1e-9)
+    velocity_error_rms = float(np.sqrt(np.mean(
+        (pos_vx[mask] - smooth_vx[mask])**2 +
+        (pos_vy[mask] - smooth_vy[mask])**2
+    )))
+
+    series = {
+        "t_s": relative[mask],
+        "error_x_m": x[mask] - target_x,
+        "error_y_m": y[mask] - target_y,
+        "vx_world_m_s": vx[mask],
+        "vy_world_m_s": vy[mask],
+        "jx_world_m_s3": jx[mask],
+        "jy_world_m_s3": jy[mask],
+        "jerk_xy_m_s3": np.hypot(jx[mask], jy[mask]),
+    }
+    return series, velocity_error_rms
+
+
+def rms_jerk(series, ts):
+    """Time-weighted RMS on the EXACT [0, Ts] interval (end interpolated)."""
+    if ts is None or ts <= 0:
+        raise ValueError("Tsが0以下、または未定義です")
+    t = series["t_s"]
+    if ts > t[-1] + 1e-9:
+        raise ValueError("Tsを含むJerkの時系列がありません")
+    inside = t[(t > 0) & (t < ts)]
+    sample_t = np.r_[0.0, inside, ts]
+    jx = np.interp(sample_t, t, series["jx_world_m_s3"])
+    jy = np.interp(sample_t, t, series["jy_world_m_s3"])
+    squared = jx**2 + jy**2
+    integral = np.trapezoid(squared, sample_t) if hasattr(np, "trapezoid") \
+        else np.trapz(squared, sample_t)
+    return float(np.sqrt(integral / ts))
+
+
+def write_timeseries(path, series):
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(keys)
-        for i in range(size):
-            writer.writerow([cols[k][i] for k in keys])
+        writer.writerow(series.keys())
+        for values in zip(*series.values()):
+            writer.writerow(values)
 
 
-def plot_one(path, name, s, rms):
+def plot_trial(path, name, series, status, ts, rms):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True, constrained_layout=True)
-    for ax, key, title in zip(axes, ("jx", "jy", "jerk_xy"),
-                              ("CoG X jerk", "CoG Y jerk", "CoG XY jerk magnitude")):
-        ax.plot(s["t"], s[key], lw=1.15, label=key)
-        ax.set_ylabel("m/s³")
-        ax.set_title(title)
-        ax.grid(True, alpha=0.25)
-    axes[2].axhline(rms, ls="--", lw=1.5, label=f"RMS (0–30 s) = {rms:.4g} m/s³")
-    axes[2].legend(loc="upper right")
-    axes[2].set_xlabel("Time after command [s]")
-    fig.suptitle(f"Jerkiness from CoG XY velocity: {name}")
-    fig.savefig(path, dpi=180)
+    t = series["t_s"]
+    fig, axes = plt.subplots(3, 1, figsize=(10, 8.5), sharex=True,
+                             constrained_layout=True)
+
+    # 1. Position tracking and the ±0.15 m completion band.
+    ax = axes[0]
+    ax.axhspan(-POSITION_TOL, POSITION_TOL, color="tab:green", alpha=0.10)
+    ax.plot(t, series["error_x_m"], label="X position error", lw=1.3)
+    ax.plot(t, series["error_y_m"], label="Y position error", lw=1.3)
+    ax.set_ylabel("Position error [m]")
+    ax.legend(loc="upper right", fontsize=8)
+
+    # 2. WORLD-frame velocities (no body-frame rotation).
+    ax = axes[1]
+    ax.plot(t, series["vx_world_m_s"], label="vx (world)", lw=1.3)
+    ax.plot(t, series["vy_world_m_s"], label="vy (world)", lw=1.3)
+    ax.set_ylabel("Velocity [m/s]")
+    ax.legend(loc="upper right", fontsize=8)
+
+    # 3. XY jerk magnitude and the completed-motion RMS.
+    ax = axes[2]
+    ax.plot(t, series["jerk_xy_m_s3"], lw=1.1, color="tab:purple",
+            label="XY jerk magnitude")
+    if rms is not None:
+        ax.axhline(rms, color="tab:orange", ls="--", lw=1.2,
+                   label=f"RMS (0-Ts): {rms:.4g} m/s³")
+    ax.set_ylabel("Jerk [m/s³]")
+    ax.legend(loc="upper right", fontsize=8)
+    ax.set_xlabel("Time from command [s]")
+
+    for ax in axes:
+        ax.axvline(0, color="black", lw=0.9, ls=":")
+        if ts is not None:
+            ax.axvspan(0, ts, color="tab:green", alpha=0.06)
+            ax.axvline(ts, color="tab:green", ls="--", lw=1.3)
+        ax.grid(alpha=0.25)
+        ax.set_xlim(0, DURATION)
+    axes[0].axvline(ARRIVAL_LIMIT, color="tab:orange", ls=":", lw=1)
+    if ts is not None:
+        axes[0].axvspan(ts, ts + HOLD, color="tab:green", alpha=0.05)
+
+    status_en = {"時間内終了": "Finished", "時間超過": "Timeout",
+                 "判定不能": "Unavailable"}.get(status, status)
+    fig.suptitle(f"DRAGON CoG XY jerk | {name} | {status_en}"
+                 + (f" | Ts={ts:.2f} s" if ts is not None else ""))
+    fig.savefig(path, dpi=170)
     plt.close(fig)
 
 
-def plot_overlay(path, trials):
+def plot_comparison(path, trials):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(11, 5.5), constrained_layout=True)
-    for label, s, m in trials:
-        ax.plot(s["t"], s["jerk_xy"], lw=1.1,
-                label=f"{label}: RMS {m['jerk_rms_0_30_m_s3']:.3g} m/s³")
-    ax.set(xlabel="Time after command [s]", ylabel="CoG XY jerk magnitude [m/s³]",
-           title="CoG XY jerk comparison (same preprocessing)")
-    ax.grid(True, alpha=0.25)
-    ax.legend()
-    fig.savefig(path, dpi=180)
+
+    fig, ax = plt.subplots(figsize=(10, 5.5), constrained_layout=True)
+    for label, series, ts, rms in trials:
+        mask = series["t_s"] <= ts + 1e-9
+        ax.plot(series["t_s"][mask], series["jerk_xy_m_s3"][mask],
+                lw=1.1, label=f"{label} (RMS={rms:.3g}, Ts={ts:.2f}s)")
+    ax.set(xlabel="Time from command [s]", ylabel="XY jerk magnitude [m/s³]",
+           title="DRAGON CoG XY jerk: completed motion only")
+    ax.grid(alpha=0.25)
+    ax.legend(fontsize=8)
+    fig.savefig(path, dpi=170)
     plt.close(fig)
+
+
+def write_metrics(path, rows):
+    with path.open("w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=OUTPUT_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("bags", nargs="+", type=Path, help="ROS1 .bag files (multiple accepted)")
-    ap.add_argument("--output-dir", type=Path,
-                    default=Path.home() / "ros/human_robot_interaction_ws/data/jerk_results",
-                    help="directory for plots and CSVs (default: ~/ros/human_robot_interaction_ws/data/jerk_results)")
-    ap.add_argument("--command-index", type=int, default=0, help="0-based +X step command index")
-    ap.add_argument("--command-time", type=float, default=None,
-                    help="override autodetection: seconds from first rosbag message")
-    ap.add_argument("--duration", type=float, default=30.0, help="evaluation duration [s]")
-    ap.add_argument("--rate", type=float, default=100.0, help="resampling frequency [Hz]")
-    ap.add_argument("--window", type=int, default=45, help="SG window length (odd samples)")
-    ap.add_argument("--polyorder", type=int, default=3, help="SG polynomial degree")
-    ap.add_argument("--padding", type=float, default=0.5, help="max SG context on each side [s]")
-    ap.add_argument("--max-gap", type=float, default=0.2, help="max odom sample interval [s]")
-    ap.add_argument("--edge-tolerance", type=float, default=0.05, help="max missing endpoint coverage [s]")
-    ap.add_argument("--step-m", type=float, default=1.0, help="expected +X step distance [m]")
-    ap.add_argument("--step-tolerance", type=float, default=0.05, help="tolerance in X/Y step detection [m]")
-    ap.add_argument("--velocity-frame", choices=("auto", "body", "world"), default="auto",
-                    help="auto: infer from frame IDs; body: rotate twist; world: no rotation")
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("bags", nargs="+", type=Path, help="ROS1 rosbag files")
+    ap.add_argument("--output", dest="output_dir", type=Path,
+                    default=Path.home() / "ros/human_robot_interaction_ws/data/jerk_results")
+    ap.add_argument("--command-index", type=int, default=0,
+                    help="0-based index among distinct +X 1m commands")
+    ap.add_argument("--command-time", type=float,
+                    help="manual t0 [s] from first NAV/ODOM bag message; matching NAV required")
+    ap.add_argument("--rate", type=float, default=100.0)
+    ap.add_argument("--window", type=int, default=45)
+    ap.add_argument("--polyorder", type=int, default=3)
+    ap.add_argument("--padding", type=float, default=0.5)
+    ap.add_argument("--kp", type=float, help="PID P gain for CSV (manual; blank if omitted)")
+    ap.add_argument("--ki", type=float, help="PID I gain for CSV (manual; blank if omitted)")
+    ap.add_argument("--kd", type=float, help="PID D gain for CSV (manual; blank if omitted)")
     args = ap.parse_args(argv)
-    if args.command_index < 0 or args.rate <= 0 or args.duration <= 0 or args.max_gap <= 0:
-        ap.error("command-index >=0、rate/duration/max-gap >0 が必要です")
+    if args.command_index < 0 or args.rate <= 0 or args.padding < 0:
+        ap.error("command-index >= 0, rate > 0, padding >= 0 が必要です")
+    if args.window % 2 != 1 or args.window <= args.polyorder or args.polyorder < 2:
+        ap.error("SG窓長は次数より大きい奇数で、次数は2以上にしてください")
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    trials, rows = [], []
-    for i, path in enumerate(args.bags):
+
+    rows, completed_trials = [], []
+    for index, given_path in enumerate(args.bags, start=1):
+        path = given_path.expanduser()
         if not path.exists() and not path.is_absolute() and (Path("data") / path).exists():
             path = Path("data") / path
-        if not path.exists():
-            print(f"[ERROR] bagファイルがありません: {path}", file=sys.stderr)
-            continue
-        try:
-            data = load_bag(path)
-            series, metrics = analyze(data, args)
-            # Include an index to avoid collisions when different folders have same stem.
-            label = f"{i+1:02d}_{data.name}"
-            write_csv(args.output_dir / f"timeseries_{label}.csv", series)
-            plot_one(args.output_dir / f"jerk_{label}.png", data.name,
-                     series, metrics["jerk_rms_0_30_m_s3"])
-            trials.append((data.name, series, metrics))
-            rows.append(metrics)
-            print(f"{data.name}: J_XY RMS = {metrics['jerk_rms_0_30_m_s3']:.6f} m/s³; "
-                  f"Activity RMS = {metrics['activity_rms_0_30_m_s']:.6f} m/s; "
-                  f"t0={metrics['command_time_from_bag_s']:.3f}s")
-            print(f"  pose frame: {metrics['frame_id']!r}, "
-                  f"twist frame: {metrics['child_frame_id']!r}, "
-                  f"velocity mode: {metrics['velocity_frame_mode']}")
-            if metrics["native_median_dt_s"] > 0.05:
-                print("  [WARN] Odometryの中央値サンプリング周期が50ms超です。微分精度に注意")
-        except Exception as exc:
-            print(f"[ERROR] {path}: {exc}", file=sys.stderr)
+        label = f"{index:02d}_{path.stem}"
+        # Gains are supplied only through CLI flags; never inferred from filenames.
+        gains = {"kp": args.kp, "ki": args.ki, "kd": args.kd}
 
-    if not rows:
-        print("有効な試行がありません。", file=sys.stderr)
-        return 1
-    summary_path = args.output_dir / "metrics.csv"
-    with summary_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
-    if len(trials) > 1:
-        plot_overlay(args.output_dir / "jerk_comparison.png", trials)
-    print(f"結果を保存しました: {args.output_dir.resolve()}")
-    if len(rows) != len(args.bags):
-        print("一部のbagの処理に失敗しました（ログを確認してください）。", file=sys.stderr)
-        return 2
-    return 0
+        status, ts, rms, reason = "判定不能", None, None, ""
+        warnings = []
+        try:
+            if not path.is_file():
+                raise FileNotFoundError(f"bagファイルがありません: {path}")
+
+            # Use the same start/end criteria as judge_convergence.py.
+            odom, commands = read_bag(path)
+            velocity, bag_start, pose_frame, twist_frame = read_world_velocity(path)
+            command = select_command(odom, commands, args.command_index,
+                                     args.command_time, bag_start)
+            status, ts, reason = judge(odom, command)
+
+            if status != "判定不能":
+                series, velocity_error = prepare_series(
+                    odom, velocity, command, args.rate,
+                    args.window, args.polyorder, args.padding)
+                if status == "時間内終了":
+                    rms = rms_jerk(series, ts)
+                    completed_trials.append((label, series, ts, rms))
+                write_timeseries(args.output_dir / f"timeseries_{label}.csv", series)
+                plot_trial(args.output_dir / f"jerk_{label}.png",
+                           path.stem, series, status, ts, rms)
+                if velocity_error > 0.10:
+                    warnings.append(
+                        f"位置微分とCoG速度のRMS差={velocity_error:.3f} m/s。"
+                        "座標系・推定値を確認"
+                    )
+        except Exception as exc:
+            status, ts, rms, reason = "判定不能", None, None, str(exc)
+
+        rows.append({
+            "試行番号": index,
+            "Kp": "" if gains["kp"] is None else gains["kp"],
+            "Ki": "" if gains["ki"] is None else gains["ki"],
+            "Kd": "" if gains["kd"] is None else gains["kd"],
+            "終了判定": status,
+            "Ts [s]": "" if ts is None else round(ts, 4),
+            "RMS Jerk [m/s³]": "" if rms is None else round(rms, 8),
+            "rosbag名": path.name,
+        })
+        # Separate trials with consistent, easy-to-scan log blocks.
+        line = "=" * 60
+        print(f"\n{line}")
+        print(f"[{index}/{len(args.bags)}] {path.name}")
+        print("-" * 60)
+        print(f"判定     : {status}")
+        if status == "時間内終了":
+            print(f"Ts       : {ts:.2f} s")
+            print(f"RMS Jerk : {rms:.4f} m/s³")
+        elif status == "判定不能" and reason:
+            print(f"原因     : {reason}")
+        for warning in warnings:
+            print(f"[WARN]   : {warning}")
+        print(line)
+
+    write_metrics(args.output_dir / "metrics.csv", rows)
+    if len(completed_trials) > 1:
+        plot_comparison(args.output_dir / "jerk_comparison.png", completed_trials)
+    counts = {key: sum(row["終了判定"] == key for row in rows)
+              for key in ("時間内終了", "時間超過", "判定不能")}
+    print("\n" + "=" * 60)
+    print(f"解析終了 : 全{len(rows)}試行 | 時間内終了 {counts['時間内終了']} | "
+          f"時間超過 {counts['時間超過']} | 判定不能 {counts['判定不能']}")
+    print(f"保存先   : {args.output_dir.resolve()}")
+    print("=" * 60)
+    return 0 if all(row["終了判定"] != "判定不能" for row in rows) else 2
 
 
 if __name__ == "__main__":
